@@ -1,0 +1,2 @@
+class TaskVector:
+    pass
