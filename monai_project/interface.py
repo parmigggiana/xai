@@ -1,6 +1,7 @@
 """
 Interface module for evaluating volumetric segmentation performance using MONAI.
 """
+
 from typing import Optional, Dict
 
 import torch
@@ -43,7 +44,7 @@ def evaluate_segmentation_performance(
             in_channels=1,
             out_channels=2,
             feature_size=48,
-            drop_rate=0.0
+            drop_rate=0.0,
         )
         # TODO: load pretrained weights if available
     # Use base_model as encoder only and freeze its weights
@@ -53,7 +54,7 @@ def evaluate_segmentation_performance(
         param.requires_grad = False
 
     # Prepare classification head: load or save from disk if save_path is given
-    num_channels = getattr(base_model, 'out_channels', 2)
+    num_channels = getattr(base_model, "out_channels", 2)
     if save_path:
         os.makedirs(save_path, exist_ok=True)
         head_file = os.path.join(save_path, f"{dataset_name}_head.pth")
@@ -79,14 +80,11 @@ def evaluate_segmentation_performance(
     # Inference and metric computation
     with torch.no_grad():
         for batch in dataloader:
-            images = batch['image'].to(device)
-            labels = batch['label'].to(device)
+            images = batch["image"].to(device)
+            labels = batch["label"].to(device)
 
             outputs = sliding_window_inference(
-                inputs=images,
-                roi_size=(96, 96, 96),
-                sw_batch_size=1,
-                predictor=model
+                inputs=images, roi_size=(96, 96, 96), sw_batch_size=1, predictor=model
             )
 
             # Apply argmax to get discrete segmentation
@@ -111,7 +109,7 @@ def evaluate_segmentation_performance(
     }
 
 
-def visualize_sample(
+def visualize_sample_slice(
     dataloader: DataLoader,
     sample_index: int = 0,
     device: Optional[torch.device] = None,
@@ -131,28 +129,138 @@ def visualize_sample(
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Fetch the specified sample
+    # print(dataloader)
     for idx, batch in enumerate(dataloader):
+        # print(f"Processing batch {idx + 1}/{len(dataloader)}")
         if idx == sample_index:
-            img = batch['image'][0].to(device).cpu().numpy()
-            seg = batch['label'][0].to(device).cpu().numpy()
+            img = batch["image"][0].to(device).cpu().numpy()
+            seg = batch["label"][0].to(device).cpu().numpy()
             break
 
-    # Select center slice along first axis
-    z = img.shape[0] // 2
-    img_slice = img[z, ...]
-    seg_slice = seg[z, ...]
+    # Select center slice along last axis (depth dimension)
+    z = img.shape[-1] // 2
+    # print(img.shape, seg.shape, z)
+
+    img_slice = img[0, ..., z]  # Remove channel dimension
+    seg_slice = seg[0, ..., z]  # Remove channel dimension
 
     # Plot
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4))
-    ax1.imshow(img_slice, cmap='gray')
-    ax1.set_title('Image Slice')
-    ax1.axis('off')
+    _, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4))
+    ax1.imshow(img_slice, cmap="gray")
+    ax1.set_title("Image Slice")
+    ax1.axis("off")
 
-    ax2.imshow(img_slice, cmap='gray')
-    ax2.imshow(seg_slice, cmap='jet', alpha=0.5)
-    ax2.set_title('Overlay Segmentation')
-    ax2.axis('off')
+    ax2.imshow(img_slice, cmap="gray")
+    ax2.imshow(seg_slice, cmap="jet", alpha=0.5, vmin=0, vmax=seg_slice.max())
+    ax2.set_title("Overlay Segmentation")
+    ax2.axis("off")
 
     plt.tight_layout()
     plt.show()
 
+
+def visualize_sample(
+    dataloader: DataLoader,
+    sample_index: int = 0,
+    device: Optional[torch.device] = None,
+) -> None:
+    """
+    Visualize all slices of a volumetric image sample and its segmentation mask.
+
+    Args:
+        dataloader (DataLoader): yields batches with 'image' and 'label'.
+        sample_index (int): index of the batch to visualize.
+        device (torch.device, optional): computation device.
+    """
+    import matplotlib.pyplot as plt
+
+    # Set device
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Fetch the specified sample
+    for idx, batch in enumerate(dataloader):
+        # print(f"Processing batch {idx + 1}/{len(dataloader)}")
+        if idx == sample_index:
+            img = batch["image"][0].to(device).cpu().numpy()
+            seg = batch["label"][0].to(device).cpu().numpy()
+            break
+
+    # print(f"Image shape: {img.shape}, Segmentation shape: {seg.shape}")
+
+    # Get number of slices
+    num_slices = img.shape[-1]
+
+    # Calculate grid size for subplots
+    cols = min(4, num_slices)  # Max 4 columns
+    rows = (num_slices + cols - 1) // cols  # Ceiling division
+
+    # Create figure with subplots
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 3, rows * 3))
+
+    # Handle case where there's only one row
+    if rows == 1:
+        axes = axes.reshape(1, -1) if num_slices > 1 else [axes]
+
+    # Plot all slices
+    for z in range(num_slices):
+        row = z // cols
+        col = z % cols
+
+        img_slice = img[0, ..., z]  # Remove channel dimension
+        seg_slice = seg[0, ..., z]  # Remove channel dimension
+
+        ax = axes[row, col] if rows > 1 else axes[col]
+
+        # Show image with segmentation overlay
+        ax.imshow(img_slice, cmap="gray")
+        ax.imshow(seg_slice, cmap="jet", alpha=0.5, vmin=0, vmax=seg_slice.max())
+        ax.set_title(f"Slice {z}")
+        ax.axis("off")
+
+    # Hide unused subplots
+    for z in range(num_slices, rows * cols):
+        row = z // cols
+        col = z % cols
+        ax = axes[row, col] if rows > 1 else axes[col]
+        ax.axis("off")
+
+    plt.tight_layout()
+    plt.show()
+
+
+def visualize_3d(
+    dataloader: DataLoader,
+    sample_index: int = 0,
+    device: Optional[torch.device] = None,
+):
+    """
+    Visualize a 3D volumetric image sample and its segmentation mask using 3D rendering.
+
+    Args:
+        dataloader (DataLoader): yields batches with 'image' and 'label'.
+        sample_index (int): index of the batch to visualize.
+        device (torch.device, optional): computation device.
+    """
+    import napari
+
+    # Set device
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Fetch the specified sample
+    for idx, batch in enumerate(dataloader):
+        if idx == sample_index:
+            img = batch["image"][0].to(device).cpu().numpy()
+            seg = batch["label"][0].to(device).cpu().numpy()
+            break
+
+    # Create a Napari viewer
+    viewer = napari.Viewer()
+
+    # Add image and segmentation layers
+    viewer.add_image(img, name="Image", colormap="gray", blending="additive")
+    viewer.add_labels(seg, name="Segmentation", opacity=0.5)
+
+    # Start the Napari event loop
+    napari.run()
