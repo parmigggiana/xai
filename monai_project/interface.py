@@ -2,17 +2,16 @@
 Interface module for evaluating volumetric segmentation performance using MONAI.
 """
 
-from typing import Optional, Dict
-
-import torch
-from torch.utils.data import DataLoader
-from monai.networks.nets import SwinUNETR
-from monai.inferers import sliding_window_inference
-from monai.metrics import DiceMetric, HausdorffDistanceMetric
 import os
+from typing import Dict, Optional
 
 import numpy as np
+import torch
 from matplotlib import cm
+from monai.inferers import sliding_window_inference
+from monai.metrics import DiceMetric, HausdorffDistanceMetric
+from monai.networks.nets import SwinUNETR
+from torch.utils.data import DataLoader
 
 
 def evaluate_segmentation_performance(

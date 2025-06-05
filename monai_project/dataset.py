@@ -1,9 +1,10 @@
 from pathlib import Path
+
+import numpy as np
+import pydicom
 import torch
 from monai.data import CacheDataset
-import numpy as np
 from PIL import Image
-import pydicom
 
 
 class CHAOSDataset(CacheDataset):

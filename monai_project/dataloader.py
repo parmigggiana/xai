@@ -1,10 +1,11 @@
-import os
 import glob
-import numpy as np
+import os
+
 import nibabel as nib
+import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
 from PIL import Image
+from torch.utils.data import DataLoader, Dataset
 
 
 class CHAOSCTDataLoader(DataLoader):
@@ -87,7 +88,6 @@ class CHAOSMRIDataLoader(DataLoader):
 
     def __len__(self):
         return len(self.patient_ids)
-
 
     def __getitem__(self, idx):
 

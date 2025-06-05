@@ -1,10 +1,10 @@
 import os
-import torch
 
+import torch
 import torch.nn
 from torch.utils.data import Dataset
 
-from monai_project.dataset import CHAOSMRIDataset, CHAOSCTDataset
+from monai_project.dataset import CHAOSCTDataset, CHAOSMRIDataset
 
 
 def get_classification_head(
