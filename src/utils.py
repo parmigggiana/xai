@@ -6,6 +6,9 @@ from torch.utils.data import Dataset
 
 from src.dataset import CHAOSDataset
 from src.modeling import ClassificationHead
+import re
+import zipfile
+import urllib.request
 
 
 def get_classification_head(
@@ -133,6 +136,41 @@ def get_dataset(dataset_name: str, domain: str, is_train: bool = True) -> Datase
     match (dataset_name, domain):
         case ("CHAOS", "MRI") | ("CHAOS", "CT"):
             base_path = "data/CHAOS"
+            os.makedirs(base_path, exist_ok=True)
+
+            # Download CHAOS dataset zip files if not already present
+            index_url = "https://xai.balzov.com/CHAOS/"
+            with urllib.request.urlopen(index_url) as response:
+                html = response.read().decode("utf-8")
+                zip_files = re.findall(r'href="([^"]+\.zip)"', html)
+
+            for zip_file in zip_files:
+                zip_path = os.path.join(base_path, zip_file)
+                extract_dir = os.path.join(base_path, os.path.splitext(zip_file)[0])
+                if not os.path.exists(zip_path):
+                    zip_url = index_url + zip_file
+                    print(f"Downloading {zip_url} to {zip_path}...")
+
+                    def reporthook(block_num, block_size, total_size):
+                        downloaded = block_num * block_size
+                        percent = (
+                            min(100, downloaded * 100 / total_size)
+                            if total_size > 0
+                            else 0
+                        )
+                        print(
+                            f"\rDownloading {zip_file}: {percent:.2f}% ({downloaded // (1024 * 1024)}MB/{total_size // (1024 * 1024)}MB)",
+                            end="",
+                        )
+
+                    urllib.request.urlretrieve(zip_url, zip_path, reporthook)
+                    print()  # Newline after download
+                # Unzip if not already extracted
+                if not os.path.exists(extract_dir):
+                    print(f"Extracting {zip_path} to {extract_dir}...")
+                    with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                        zip_ref.extractall(extract_dir)
+
             split = "train" if is_train else "test"
             return CHAOSDataset(base_path=base_path, domain=domain, split=split)
         case _:
