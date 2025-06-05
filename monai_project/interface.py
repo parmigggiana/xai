@@ -11,6 +11,9 @@ from monai.inferers import sliding_window_inference
 from monai.metrics import DiceMetric, HausdorffDistanceMetric
 import os
 
+import numpy as np
+from matplotlib import cm
+
 
 def evaluate_segmentation_performance(
     dataset_name: str,
@@ -109,52 +112,108 @@ def evaluate_segmentation_performance(
     }
 
 
+def _fetch_sample_from_dataloader(
+    dataloader: DataLoader, sample_index: int, device: Optional[torch.device] = None
+):
+    """
+    Utility function to fetch a single sample (image, label) from a dataloader.
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    for idx, batch in enumerate(dataloader):
+        if idx == sample_index:
+            img = batch["image"][0].to(device).cpu().numpy()
+            seg = batch["label"][0].to(device).cpu().numpy()
+            return img, seg
+    raise IndexError(f"Sample index {sample_index} out of range.")
+
+
+def _get_organ_legend(seg_slice, seg_max, dataset_name="CHAOS_MRI"):
+    """
+    Utility function to get legend labels and colors for organs present in the segmentation.
+    Handles different conventions for CHAOS_MRI, CHAOS_CT, and other datasets.
+    """
+    legend_labels = []
+    legend_colors = []
+    if dataset_name == "CHAOS_MRI":
+        organ_ranges = {
+            "Liver": (55, 70, 63),
+            "Right kidney": (110, 135, 126),
+            "Left kidney": (175, 200, 189),
+            "Spleen": (240, 255, 252),
+        }
+        for organ_name, (min_val, max_val, center_val) in organ_ranges.items():
+            if np.any((seg_slice >= min_val) & (seg_slice <= max_val)):
+                legend_labels.append(organ_name)
+                color_pos = center_val / seg_max if seg_max > 0 else 0
+                legend_colors.append(cm.jet(color_pos))
+    elif dataset_name == "CHAOS_CT":
+        if np.any(seg_slice > 0):
+            legend_labels.append("Liver")
+            legend_colors.append(cm.jet(0.5))
+    else:
+        # Generic: just show unique nonzero labels
+        unique_labels = np.unique(seg_slice)
+        unique_labels = unique_labels[unique_labels > 0]
+        for label in unique_labels:
+            legend_labels.append(f"Label {int(label)}")
+            color_pos = label / seg_max if seg_max > 0 else 0
+            legend_colors.append(cm.jet(color_pos))
+    return legend_labels, legend_colors
+
+
 def visualize_sample_slice(
     dataloader: DataLoader,
     sample_index: int = 0,
     device: Optional[torch.device] = None,
+    dataset_name: str = "CHAOS_MRI",
 ) -> None:
     """
     Visualize a volumetric image sample and its segmentation mask (center slice).
-
-    Args:
-        dataloader (DataLoader): yields batches with 'image' and 'label'.
-        sample_index (int): index of the batch to visualize.
-        device (torch.device, optional): computation device.
     """
     import matplotlib.pyplot as plt
 
-    # Set device
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Fetch the specified sample
-    # print(dataloader)
-    for idx, batch in enumerate(dataloader):
-        # print(f"Processing batch {idx + 1}/{len(dataloader)}")
-        if idx == sample_index:
-            img = batch["image"][0].to(device).cpu().numpy()
-            seg = batch["label"][0].to(device).cpu().numpy()
-            break
-
-    # Select center slice along last axis (depth dimension)
+    img, seg = _fetch_sample_from_dataloader(dataloader, sample_index, device)
     z = img.shape[-1] // 2
-    # print(img.shape, seg.shape, z)
+    img_slice = img[0, ..., z]
+    seg_slice = seg[0, ..., z]
 
-    img_slice = img[0, ..., z]  # Remove channel dimension
-    seg_slice = seg[0, ..., z]  # Remove channel dimension
-
-    # Plot
     _, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4))
     ax1.imshow(img_slice, cmap="gray")
     ax1.set_title("Image Slice")
     ax1.axis("off")
 
     ax2.imshow(img_slice, cmap="gray")
-    ax2.imshow(seg_slice, cmap="jet", alpha=0.5, vmin=0, vmax=seg_slice.max())
+    overlay = np.zeros_like(seg_slice, dtype=np.float32)
+    mask = seg_slice > 0
+    overlay[mask] = seg_slice[mask]
+    cmap = cm.get_cmap("jet").copy()
+    cmap.set_bad(alpha=0)
+    masked_overlay = np.ma.masked_where(overlay == 0, overlay)
+    ax2.imshow(masked_overlay, cmap=cmap, alpha=0.4)
+    seg_max = seg_slice.max()
+    legend_labels, legend_colors = _get_organ_legend(seg_slice, seg_max, dataset_name)
+    if legend_labels:
+        legend_elements = [
+            plt.Line2D(
+                [0],
+                [0],
+                marker="s",
+                color="w",
+                markerfacecolor=color,
+                markersize=10,
+                label=label,
+            )
+            for label, color in zip(legend_labels, legend_colors)
+        ]
+        ax2.legend(
+            handles=legend_elements,
+            loc="upper right",
+            frameon=True,
+            facecolor="white",
+        )
     ax2.set_title("Overlay Segmentation")
     ax2.axis("off")
-
     plt.tight_layout()
     plt.show()
 
@@ -163,62 +222,63 @@ def visualize_sample(
     dataloader: DataLoader,
     sample_index: int = 0,
     device: Optional[torch.device] = None,
+    dataset_name: str = "CHAOS_MRI",
 ) -> None:
     """
     Visualize all slices of a volumetric image sample and its segmentation mask.
-
-    Args:
-        dataloader (DataLoader): yields batches with 'image' and 'label'.
-        sample_index (int): index of the batch to visualize.
-        device (torch.device, optional): computation device.
     """
     import matplotlib.pyplot as plt
 
-    # Set device
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Fetch the specified sample
-    for idx, batch in enumerate(dataloader):
-        # print(f"Processing batch {idx + 1}/{len(dataloader)}")
-        if idx == sample_index:
-            img = batch["image"][0].to(device).cpu().numpy()
-            seg = batch["label"][0].to(device).cpu().numpy()
-            break
-
-    # print(f"Image shape: {img.shape}, Segmentation shape: {seg.shape}")
-
-    # Get number of slices
+    img, seg = _fetch_sample_from_dataloader(dataloader, sample_index, device)
     num_slices = img.shape[-1]
-
-    # Calculate grid size for subplots
-    cols = min(4, num_slices)  # Max 4 columns
-    rows = (num_slices + cols - 1) // cols  # Ceiling division
-
-    # Create figure with subplots
+    cols = min(4, num_slices)
+    rows = (num_slices + cols - 1) // cols
     fig, axes = plt.subplots(rows, cols, figsize=(cols * 3, rows * 3))
-
-    # Handle case where there's only one row
     if rows == 1:
         axes = axes.reshape(1, -1) if num_slices > 1 else [axes]
+    seg_max = seg.max()
 
-    # Plot all slices
     for z in range(num_slices):
         row = z // cols
         col = z % cols
-
-        img_slice = img[0, ..., z]  # Remove channel dimension
-        seg_slice = seg[0, ..., z]  # Remove channel dimension
-
+        img_slice = img[0, ..., z]
+        seg_slice = seg[0, ..., z]
         ax = axes[row, col] if rows > 1 else axes[col]
-
-        # Show image with segmentation overlay
         ax.imshow(img_slice, cmap="gray")
-        ax.imshow(seg_slice, cmap="jet", alpha=0.5, vmin=0, vmax=seg_slice.max())
+        overlay = np.zeros_like(seg_slice, dtype=np.float32)
+        mask = seg_slice > 0
+        overlay[mask] = seg_slice[mask]
+        cmap = cm.get_cmap("jet").copy()
+        cmap.set_bad(alpha=0)
+        masked_overlay = np.ma.masked_where(overlay == 0, overlay)
+        ax.imshow(masked_overlay, cmap=cmap, alpha=0.4, vmin=0, vmax=seg_max)
         ax.set_title(f"Slice {z}")
         ax.axis("off")
 
-    # Hide unused subplots
+    if seg_max > 0:
+        legend_labels, legend_colors = _get_organ_legend(seg, seg_max, dataset_name)
+        if legend_labels:
+            legend_elements = [
+                plt.Line2D(
+                    [0],
+                    [0],
+                    marker="s",
+                    color="w",
+                    markerfacecolor=color,
+                    markersize=10,
+                    label=label,
+                )
+                for label, color in zip(legend_labels, legend_colors)
+            ]
+            fig.legend(
+                handles=legend_elements,
+                loc="upper center",
+                bbox_to_anchor=(0.5, 1.05),
+                ncol=len(legend_labels),
+                frameon=True,
+                facecolor="white",
+            )
+
     for z in range(num_slices, rows * cols):
         row = z // cols
         col = z % cols

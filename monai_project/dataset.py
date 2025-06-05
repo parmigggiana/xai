@@ -6,8 +6,15 @@ from PIL import Image
 import pydicom
 
 
-class CHAOSMRIDataset(CacheDataset):
-    def __init__(self, base_path: str, split: str = "Train_Sets", *args, **kwargs):
+class CHAOSDataset(CacheDataset):
+    def __init__(
+        self,
+        base_path: str,
+        domain: str,
+        split: str = "Train_Sets",
+        *args,
+        **kwargs,
+    ):
         """
         Initializes the CHAOS MRI Dataset.
 
@@ -15,8 +22,19 @@ class CHAOSMRIDataset(CacheDataset):
             data (list): List of MRI data samples.
             labels (list): List of corresponding labels for the data samples.
         """
+        assert domain.upper() in [
+            "MRI",
+            "MR",
+            "CT",
+        ], "Domain must be either 'MRI'/'MR' or 'CT'."
+        assert split.lower() in [
+            "train",
+            "test",
+        ], "Split must be either 'train' or 'test'."
+
         self.base_path = base_path
-        self.split = split
+        self.split = "Test_Sets" if split.lower() == "test" else "Train_Sets"
+        self.domain = "CT" if domain.upper() == "CT" else "MR"
 
         # Load data and labels from the specified directory
         data = self._load_data()
@@ -27,10 +45,12 @@ class CHAOSMRIDataset(CacheDataset):
         Loads MRI data and labels from the specified directory.
 
         Returns:
-            tuple: A tuple containing two lists - data and labels.
+            list: List of dictionaries containing 'image' and 'label' tensors.
         """
 
-        data_path = Path(self.base_path) / f"CHAOS_{self.split}" / self.split / "MR"
+        data_path = (
+            Path(self.base_path) / f"CHAOS_{self.split}" / self.split / self.domain
+        )
 
         data = []
 
@@ -40,8 +60,13 @@ class CHAOSMRIDataset(CacheDataset):
                 continue
             # print("Processing patient:", patient_id)
 
-            img_path = patient_id / "T2SPIR" / "DICOM_anon"
-            seg_path = patient_id / "T2SPIR" / "Ground"
+            if self.domain == "CT":
+                img_path = patient_id / "DICOM_anon"
+                seg_path = patient_id / "Ground"
+            else:  # Ignoring T1DUAL for now
+                img_path = patient_id / "T2SPIR" / "DICOM_anon"
+                seg_path = patient_id / "T2SPIR" / "Ground"
+
             # print(f"Loading data from {img_path} and labels from {seg_path}")
 
             img_files = sorted(img_path.glob("*.dcm"))
@@ -56,7 +81,7 @@ class CHAOSMRIDataset(CacheDataset):
                     img_data = dicom_data.pixel_array.astype(np.float32)
                     img_slices.append(img_data)
                 else:
-                    raise ValueError(f"Unsupported MRI file format: {img_file}")
+                    raise ValueError(f"Unsupported file format: {img_file}")
 
             # Load segmentation slices
             seg_slices = []

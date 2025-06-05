@@ -2,8 +2,14 @@ import os
 import torch
 
 import torch.nn
+from torch.utils.data import Dataset
 
-def get_classification_head(dataset_name: str, num_classes: int, save_path: str) -> torch.nn.Module:
+from monai_project.dataset import CHAOSMRIDataset, CHAOSCTDataset
+
+
+def get_classification_head(
+    dataset_name: str, num_classes: int, save_path: str
+) -> torch.nn.Module:
     """
     Get the classification head for a given dataset.
 
@@ -21,7 +27,9 @@ def get_classification_head(dataset_name: str, num_classes: int, save_path: str)
         classification_head = torch.load(save_path)
     else:
         # Create new classification head
-        classification_head = torch.nn.Linear(512, num_classes)  # Assuming 512 input features
+        classification_head = torch.nn.Linear(
+            512, num_classes
+        )  # Assuming 512 input features
 
         # Save the classification head
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -34,7 +42,7 @@ def finetune(
     model: torch.nn.Module,
     train_loader: torch.utils.data.DataLoader,
     save_path: str,
-    device: torch.device = None
+    device: torch.device = None,
 ):
     """
     Finetune a model on a given dataset.
@@ -55,10 +63,12 @@ def finetune(
     model.train()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    loss = torch.nn.CrossEntropyLoss()  # For pixel-wise classification in semantic segmentation
+    loss = (
+        torch.nn.CrossEntropyLoss()
+    )  # For pixel-wise classification in semantic segmentation
 
     patience = 3
-    best_loss = float('inf')
+    best_loss = float("inf")
     patience_counter = 0
 
     best_model_state = None
@@ -81,7 +91,7 @@ def finetune(
             num_batches += 1
 
         avg_loss = epoch_loss / num_batches
-        print(f'Epoch {epoch+1}, Loss: {avg_loss:.4f}')
+        print(f"Epoch {epoch+1}, Loss: {avg_loss:.4f}")
 
         # Early stopping logic
         if avg_loss < best_loss:
@@ -92,7 +102,7 @@ def finetune(
             patience_counter += 1
 
         if patience_counter >= patience:
-            print(f'Early stopping at epoch {epoch+1}')
+            print(f"Early stopping at epoch {epoch+1}")
             break
 
         epoch += 1
@@ -107,3 +117,26 @@ def finetune(
 
     return model
 
+
+def get_dataset(dataset_name: str, is_train: bool = True) -> Dataset:
+    """
+    Get the dataset path for a given dataset name.
+
+    Args:
+        dataset_name (str): Name of the dataset.
+        is_train (bool): Whether to get the training or validation dataset path.
+
+    Returns:
+        str: Path to the dataset.
+    """
+    match dataset_name:
+        case "CHAOS_MRI":
+            base_path = "data/CHAOS"
+            split = "Train_Sets" if is_train else "Test_Sets"
+            return CHAOSMRIDataset(base_path=base_path, split=split)
+        case "CHAOS_CT":
+            base_path = "data/CHAOS"
+            split = "Train_Sets" if is_train else "Test_Sets"
+            return CHAOSCTDataset(base_path=base_path, split=split)
+        case _:
+            raise ValueError(f"Unknown dataset: {dataset_name}")
