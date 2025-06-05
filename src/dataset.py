@@ -12,7 +12,7 @@ class CHAOSDataset(CacheDataset):
         self,
         base_path: str,
         domain: str,
-        split: str = "Train_Sets",
+        split: str = "train",
         *args,
         **kwargs,
     ):
@@ -27,11 +27,11 @@ class CHAOSDataset(CacheDataset):
             "MRI",
             "MR",
             "CT",
-        ], "Domain must be either 'MRI'/'MR' or 'CT'."
+        ], f"Domain {domain} is invalid. It must be either 'MRI'/'MR' or 'CT'."
         assert split.lower() in [
             "train",
             "test",
-        ], "Split must be either 'train' or 'test'."
+        ], f"Split {split} is invalid. It must be either 'train' or 'test'."
 
         self.base_path = base_path
         self.split = "Test_Sets" if split.lower() == "test" else "Train_Sets"

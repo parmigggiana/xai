@@ -4,7 +4,8 @@ import torch
 import torch.nn
 from torch.utils.data import Dataset
 
-from monai_project.dataset import CHAOSCTDataset, CHAOSMRIDataset
+from src.dataset import CHAOSDataset
+from src.modeling import ClassificationHead
 
 
 def get_classification_head(
@@ -62,7 +63,7 @@ def finetune(
     model.to(device)
     model.train()
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
     loss = (
         torch.nn.CrossEntropyLoss()
     )  # For pixel-wise classification in semantic segmentation
@@ -118,7 +119,7 @@ def finetune(
     return model
 
 
-def get_dataset(dataset_name: str, is_train: bool = True) -> Dataset:
+def get_dataset(dataset_name: str, domain: str, is_train: bool = True) -> Dataset:
     """
     Get the dataset path for a given dataset name.
 
@@ -129,14 +130,26 @@ def get_dataset(dataset_name: str, is_train: bool = True) -> Dataset:
     Returns:
         str: Path to the dataset.
     """
-    match dataset_name:
-        case "CHAOS_MRI":
+    match (dataset_name, domain):
+        case ("CHAOS", "MRI") | ("CHAOS", "CT"):
             base_path = "data/CHAOS"
-            split = "Train_Sets" if is_train else "Test_Sets"
-            return CHAOSMRIDataset(base_path=base_path, split=split)
-        case "CHAOS_CT":
-            base_path = "data/CHAOS"
-            split = "Train_Sets" if is_train else "Test_Sets"
-            return CHAOSCTDataset(base_path=base_path, split=split)
+            split = "train" if is_train else "test"
+            return CHAOSDataset(base_path=base_path, domain=domain, split=split)
         case _:
             raise ValueError(f"Unknown dataset: {dataset_name}")
+
+
+def get_classification_head(dataset_name: str, domain: str) -> ClassificationHead:
+    """
+    Get the classification head for a given dataset.
+
+    Args:
+        dataset_name (str): Name of the dataset.
+        num_classes (int): Number of classes for classification.
+
+    Returns:
+        torch.nn.Module: Classification head.
+    """
+    raise NotImplementedError(
+        f"Classification head for dataset {dataset_name} is not implemented."
+    )
