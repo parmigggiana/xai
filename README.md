@@ -9,10 +9,13 @@ This project provides a skeleton for volumetric segmentation tasks using the MON
 ## Usage
 
 1. Install dependencies:
+
    ```bash
    pip install -r requirements.txt
    ```
+
 2. Import and call the evaluation function:
+
    ```python
    from monai_project.interface import evaluate_segmentation_performance
    
@@ -22,3 +25,11 @@ This project provides a skeleton for volumetric segmentation tasks using the MON
    )
    print(metrics)
    ```
+
+# References
+
+MM-WHS:
+[1] Xiahai Zhuang: Multivariate mixture model for myocardial segmentation combining multi-source images. IEEE Transactions on Pattern Analysis and Machine Intelligence 41(12): 2933-2946, 2019. [link](https://ieeexplore.ieee.org/document/8458220/) [code](https://github.com/xzluo97/MvMM-Demo)
+[2] X Zhuang & J Shen: Multi-scale patch and multi-modality atlases for whole heart segmentation of MRI, Medical Image Analysis 31: 77-87, 2016 ([link](http://dx.doi.org/10.1016/j.media.2016.02.006))
+[3] F Wu & X Zhuang. Minimizing Estimated Risks on Unlabeled Data: A New Formulation for Semi-Supervised Medical Image Segmentation. IEEE Transactions on Pattern Analysis and Machine Intelligence (T PAMI) 45(5): 6021 - 6036, 2023 [link](https://ieeexplore.ieee.org/document/9921323) [code](https://github.com/FupingWu90/MERU)
+[4] S Gao, H Zhou, Y Gao, X Zhuang. BayeSeg: Bayesian Modeling for Medical Image Segmentation with Interpretable Generalizability. Medical Image Analysis 89, 102889, 2023 [code&tutorial](https://github.com/obiyoag/BayeSeg), [link](https://www.sciencedirect.com/journal/medical-image-analysis/special-issue/10MFST0CK73) (Elsevier-MedIA 1st Prize & Best Paper Award of MICCAl society 2023)

@@ -1,5 +1,6 @@
-torch>=1.12.1
-monai>=1.1.0
+torch
+torchvision
+monai
 numpy
 # nibabel
 pydicom

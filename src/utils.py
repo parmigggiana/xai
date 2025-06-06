@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 import torch
@@ -9,8 +8,11 @@ from src.dataset import CHAOSDataset, MMWHSDataset
 from src.modeling import ClassificationHead
 import re
 import zipfile
+import torch
+from monai.networks.nets.resnet import get_pretrained_resnet_medicalnet
 import urllib.request
 import urllib.parse
+from torchvision.models import ResNet
 
 
 def get_classification_head(
@@ -28,7 +30,7 @@ def get_classification_head(
     """
 
     # Check if classification head exists at save_path
-    if os.path.exists(save_path):
+    if Path(save_path).exists():
         # Load existing classification head
         classification_head = torch.load(save_path)
     else:
@@ -38,7 +40,7 @@ def get_classification_head(
         )  # Assuming 512 input features
 
         # Save the classification head
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         torch.save(classification_head, save_path)
 
     return classification_head
@@ -118,7 +120,7 @@ def finetune(
         model.load_state_dict(best_model_state)
 
     # Save the finetuned model checkpoint
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), save_path)
 
     return model
@@ -139,7 +141,7 @@ def get_dataset(
     """
     dataset_path = Path(base_path) / dataset_name
     split = "train" if is_train else "test"
-    os.makedirs(dataset_path, exist_ok=True)
+    dataset_path.mkdir(parents=True, exist_ok=True)
     download_and_extract_dataset(dataset_name, base_path)
     match dataset_name:
         case "CHAOS":
@@ -159,9 +161,9 @@ def download_and_extract_dataset(dataset: str, base_path: str = "data/"):
     for zip_file in zip_files:
         # Decode URL encoding in file names
         decoded_zip_file = urllib.parse.unquote(zip_file)
-        zip_path = os.path.join(base_path, decoded_zip_file)
-        extract_dir = os.path.join(base_path, os.path.splitext(decoded_zip_file)[0])
-        if not os.path.exists(zip_path):
+        zip_path = base_path / decoded_zip_file
+        extract_dir = base_path / Path(decoded_zip_file).with_suffix("")
+        if not zip_path.exists():
             zip_url = index_url + zip_file
             print(f"Downloading {zip_url} to {zip_path}...")
 
@@ -180,13 +182,15 @@ def download_and_extract_dataset(dataset: str, base_path: str = "data/"):
             urllib.request.urlretrieve(zip_url, zip_path, reporthook)
             print()  # Newline after download
         # Unzip if not already extracted
-        if not os.path.exists(extract_dir):
+        if not extract_dir.exists():
             print(f"Extracting {zip_path} to {extract_dir}...")
             with zipfile.ZipFile(zip_path, "r") as zip_ref:
                 zip_ref.extractall(extract_dir)
 
 
-def get_classification_head(dataset_name: str, domain: str) -> ClassificationHead:
+def get_classification_head(
+    dataset_name: str, domain: str, save_path: str
+) -> ClassificationHead:
     """
     Get the classification head for a given dataset.
 
@@ -197,6 +201,63 @@ def get_classification_head(dataset_name: str, domain: str) -> ClassificationHea
     Returns:
         torch.nn.Module: Classification head.
     """
-    raise NotImplementedError(
-        f"Classification head for dataset {dataset_name} is not implemented."
-    )
+    # raise NotImplementedError(
+    #     f"Classification head for dataset {dataset_name} is not implemented."
+    # )
+    match (dataset_name.upper(), domain.upper()):
+        case ("CHAOS", "CT"):
+            out_channels = 2
+        case ("CHAOS", "MR"):
+            out_channels = 5
+        case _:
+            raise ValueError(
+                f"Unsupported dataset {dataset_name} or domain {domain} for classification head."
+            )
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Get in_channels from ResNet output channels (usually 512 for ResNet)
+    in_channels = 512
+
+    if save_path:
+        Path(save_path).mkdir(parents=True, exist_ok=True)
+        head_file = Path(save_path) / f"{dataset_name}_head.pth"
+
+    if head_file and head_file.exists():
+        head = torch.nn.Conv3d(in_channels, out_channels, kernel_size=1)
+        head.load_state_dict(torch.load(head_file, map_location=device))
+        head = head.to(device)
+    else:
+        head = torch.nn.Conv3d(in_channels, out_channels, kernel_size=1).to(device)
+        # Initialize weights and biases
+        torch.nn.init.xavier_uniform_(head.weight)
+        if head.bias is not None:
+            torch.nn.init.zeros_(head.bias)
+        # TODO
+        torch.save(head.state_dict(), head_file)
+
+    return head
+
+
+def get_baseline_encoder(base_path: str = "", depth: int = 10) -> torch.nn.Module:
+    """
+    Get the baseline encoder for the model.
+
+    Args:
+        base_path (str): Base path to load the encoder from.
+
+    Returns:
+        torch.nn.Module: Baseline encoder.
+    """
+
+    encoder_path = Path(base_path) / f"baseline_{depth}.pth"
+    encoder = ResNet(depth)
+
+    if encoder_path.exists():
+        state_dict = torch.load(encoder_path, map_location="cpu")
+        encoder.load_state_dict(state_dict)
+    else:
+        state_dict = get_pretrained_resnet_medicalnet(depth)
+        encoder.load_state_dict(state_dict)
+        Path(base_path).mkdir(parents=True, exist_ok=True)
+        torch.save(encoder.state_dict(), encoder_path)
+    return encoder

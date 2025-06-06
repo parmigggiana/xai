@@ -42,3 +42,22 @@ class Classifier(torch.nn.Module):
 
     def __call__(self, inputs):
         return self.forward(inputs)
+
+    def eval(self, *args, **kwargs):
+        self.image_encoder.eval(*args, **kwargs)
+        self.classification_head.eval(*args, **kwargs)
+        return self
+
+    def train(self, *args, **kwargs):
+        self.image_encoder.train(*args, **kwargs)
+        self.classification_head.train(*args, **kwargs)
+        return self
+
+    def freeze_classification_head(self):
+        for param in self.classification_head.parameters():
+            param.requires_grad = False
+
+    def freeze(self):
+        for param in self.image_encoder.parameters():
+            param.requires_grad = False
+        self.freeze_classification_head()
