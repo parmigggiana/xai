@@ -5,11 +5,12 @@ import torch
 import torch.nn
 from torch.utils.data import Dataset
 
-from src.dataset import CHAOSDataset
+from src.dataset import CHAOSDataset, MMWHSDataset
 from src.modeling import ClassificationHead
 import re
 import zipfile
 import urllib.request
+import urllib.parse
 
 
 def get_classification_head(
@@ -140,13 +141,11 @@ def get_dataset(
     split = "train" if is_train else "test"
     os.makedirs(dataset_path, exist_ok=True)
     download_and_extract_dataset(dataset_name, base_path)
-    match (dataset_name, domain):
-        case ("CHAOS", "MRI") | ("CHAOS", "CT"):
+    match dataset_name:
+        case "CHAOS":
             return CHAOSDataset(base_path=dataset_path, domain=domain, split=split)
-        case ("MM-WHS", "MRI") | ("MM-WHS", "CT"):
-            raise NotImplementedError(
-                f"Dataset {dataset_name} with domain {domain} is not implemented."
-            )
+        case "MM-WHS":
+            raise MMWHSDataset(base_path=dataset_path, domain=domain, split=split)
         case _:
             raise ValueError(f"Unknown dataset: {dataset_name}")
 
@@ -157,15 +156,18 @@ def download_and_extract_dataset(dataset: str, base_path: str = "data/"):
     with urllib.request.urlopen(index_url) as response:
         html = response.read().decode("utf-8")
         zip_files = re.findall(r'href="([^"]+\.zip)"', html)
-
     for zip_file in zip_files:
-        zip_path = os.path.join(base_path, zip_file)
-        extract_dir = os.path.join(base_path, os.path.splitext(zip_file)[0])
+        # Decode URL encoding in file names
+        decoded_zip_file = urllib.parse.unquote(zip_file)
+        zip_path = os.path.join(base_path, decoded_zip_file)
+        extract_dir = os.path.join(base_path, os.path.splitext(decoded_zip_file)[0])
         if not os.path.exists(zip_path):
             zip_url = index_url + zip_file
             print(f"Downloading {zip_url} to {zip_path}...")
 
-            def reporthook(block_num, block_size, total_size, zip_file=zip_file):
+            def reporthook(
+                block_num, block_size, total_size, zip_file=decoded_zip_file
+            ):
                 downloaded = block_num * block_size
                 percent = (
                     min(100, downloaded * 100 / total_size) if total_size > 0 else 0

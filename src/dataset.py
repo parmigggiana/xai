@@ -1,3 +1,4 @@
+from abc import abstractmethod
 from pathlib import Path
 
 import numpy as np
@@ -7,51 +8,41 @@ from monai.data import CacheDataset
 from PIL import Image
 
 
-class CHAOSDataset(CacheDataset):
+class BaseDataset(CacheDataset):
     def __init__(
-        self,
-        base_path: str,
-        domain: str,
-        split: str = "train",
-        *args,
-        **kwargs,
+        self, base_path: str, domain: str, split: str = "train", *args, **kwargs
     ):
-        """
-        Initializes the CHAOS MRI Dataset.
-
-        Args:
-            data (list): List of MRI data samples.
-            labels (list): List of corresponding labels for the data samples.
-        """
-        assert domain.upper() in [
+        domain = domain.upper()
+        split = split.lower()
+        assert domain in [
             "MRI",
             "MR",
             "CT",
         ], f"Domain {domain} is invalid. It must be either 'MRI'/'MR' or 'CT'."
-        assert split.lower() in [
+        assert split in [
             "train",
             "test",
         ], f"Split {split} is invalid. It must be either 'train' or 'test'."
 
         self.base_path = base_path
-        self.split = "Test_Sets" if split.lower() == "test" else "Train_Sets"
-        self.domain = "CT" if domain.upper() == "CT" else "MR"
+        self.split = split
+        self.domain = domain
 
-        # Load data and labels from the specified directory
         data = self._load_data()
         super().__init__(data, *args, **kwargs)
 
+    @abstractmethod
     def _load_data(self):
-        """
-        Loads MRI data and labels from the specified directory.
+        raise NotImplementedError("Subclasses must implement this method.")
 
-        Returns:
-            list: List of dictionaries containing 'image' and 'label' tensors.
-        """
 
-        data_path = (
-            Path(self.base_path) / f"CHAOS_{self.split}" / self.split / self.domain
-        )
+class CHAOSDataset(BaseDataset):
+
+    def _load_data(self):
+        split_dir = "Test_Sets" if self.split == "test" else "Train_Sets"
+        domain = "CT" if self.domain == "CT" else "MR"
+
+        data_path = Path(self.base_path) / f"CHAOS_{split_dir}" / split_dir / domain
 
         data = []
 
@@ -61,7 +52,7 @@ class CHAOSDataset(CacheDataset):
                 continue
             # print("Processing patient:", patient_id)
 
-            if self.domain == "CT":
+            if domain == "CT":
                 img_path = patient_id / "DICOM_anon"
                 seg_path = patient_id / "Ground"
             else:  # Ignoring T1DUAL for now
@@ -109,3 +100,19 @@ class CHAOSDataset(CacheDataset):
             data.append(sample)
 
         return data
+
+
+class MMWHSDataset(BaseDataset):
+    def _load_data(self):
+        """
+        data/MM-WHS
+        └── MM-WHS 2017 Dataset
+            └── MM-WHS 2017 Dataset
+            ├── ct_test/         # imgs, .nii.gz
+            ├── ct_train/        # imgs + labels, .nii.gz
+            ├── mr_test/         # imgs, .nii.gz
+            └── mr_train/        # imgs + labels, .nii.gz
+        └── MMWHS_evaluation_testdata_label_encrypt_1mm_forpublic
+            └── nii/                # labels, .nii.gz
+        """
+        raise NotImplementedError("MM-WHS dataset loading is not implemented yet.")
