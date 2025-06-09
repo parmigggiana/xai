@@ -2,7 +2,9 @@ torch
 torchvision
 monai
 numpy
-# nibabel
+nibabel
 pydicom
 PILlow
 napari
+matplotlib
+pyqt5

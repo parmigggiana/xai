@@ -7,7 +7,9 @@ from typing import Optional
 import numpy as np
 import torch
 from matplotlib import cm
+import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
+
 
 
 def _fetch_sample_from_dataloader(
@@ -72,11 +74,23 @@ def visualize_sample_slice(
     import matplotlib.pyplot as plt
 
     img, seg = _fetch_sample_from_dataloader(dataloader, sample_index, device)
-    z = img.shape[-1] // 2
-    img_slice = img[0, ..., z]
-    seg_slice = seg[0, ..., z]
+    print(img.shape)
+    # Handle (H, W, D) or (C, H, W, D)
+    if img.ndim == 3:
+        z = img.shape[-1] // 2
+        img_slice = img[..., z]
+        seg_slice = seg[..., z]
+    elif img.ndim == 4:
+        z = img.shape[-1] // 2
+        img_slice = img[0, ..., z]
+        seg_slice = seg[0, ..., z]
+    else:
+        raise ValueError(f"Unsupported image shape: {img.shape}")
 
     _, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4))
+    img_slice = np.rot90(img_slice, k=1)
+    seg_slice = np.rot90(seg_slice, k=1)
+
     ax1.imshow(img_slice, cmap="gray")
     ax1.set_title("Image Slice")
     ax1.axis("off")
@@ -125,23 +139,30 @@ def visualize_sample(
     """
     Visualize all slices of a volumetric image sample and its segmentation mask.
     """
-    import matplotlib.pyplot as plt
-
     img, seg = _fetch_sample_from_dataloader(dataloader, sample_index, device)
     num_slices = img.shape[-1]
     cols = min(4, num_slices)
     rows = (num_slices + cols - 1) // cols
     fig, axes = plt.subplots(rows, cols, figsize=(cols * 3, rows * 3))
-    if rows == 1:
-        axes = axes.reshape(1, -1) if num_slices > 1 else [axes]
+    # Ensure axes is always a 2D array for consistent indexing
+    if rows != cols:
+        axes = np.array(axes).reshape(1, -1)
+   
     seg_max = seg.max()
 
     for z in range(num_slices):
         row = z // cols
         col = z % cols
-        img_slice = img[0, ..., z]
-        seg_slice = seg[0, ..., z]
-        ax = axes[row, col] if rows > 1 else axes[col]
+        # Handle (H, W, D) or (C, H, W, D)
+        if img.ndim == 3:
+            img_slice = img[..., z]
+            seg_slice = seg[..., z]
+        elif img.ndim == 4:
+            img_slice = img[0, ..., z]
+            seg_slice = seg[0, ..., z]
+        else:
+            raise ValueError(f"Unsupported image shape: {img.shape}")
+        ax = axes[row, col]
         ax.imshow(img_slice, cmap="gray")
         overlay = np.zeros_like(seg_slice, dtype=np.float32)
         mask = seg_slice > 0
@@ -149,6 +170,7 @@ def visualize_sample(
         cmap = cm.get_cmap("jet").copy()
         cmap.set_bad(alpha=0)
         masked_overlay = np.ma.masked_where(overlay == 0, overlay)
+        
         ax.imshow(masked_overlay, cmap=cmap, alpha=0.4, vmin=0, vmax=seg_max)
         ax.set_title(f"Slice {z}")
         ax.axis("off")
@@ -180,7 +202,7 @@ def visualize_sample(
     for z in range(num_slices, rows * cols):
         row = z // cols
         col = z % cols
-        ax = axes[row, col] if rows > 1 else axes[col]
+        ax = axes[row, col]
         ax.axis("off")
 
     plt.tight_layout()
@@ -217,6 +239,9 @@ def visualize_3d(
     viewer = napari.Viewer()
 
     # Add image and segmentation layers
+    img = np.rot90(img, k=1, axes=(0, 1))  # Rotate for correct orientation
+    seg = np.rot90(seg, k=1, axes=(0, 1))  # Rotate for correct orientation
+
     viewer.add_image(img, name="Image", colormap="gray", blending="additive")
     viewer.add_labels(seg, name="Segmentation", opacity=0.5)
 

@@ -6,6 +6,7 @@ import pydicom
 import torch
 from monai.data import CacheDataset
 from PIL import Image
+import nibabel as nib
 
 
 class BaseDataset(CacheDataset):
@@ -114,5 +115,66 @@ class MMWHSDataset(BaseDataset):
             └── mr_train/        # imgs + labels, .nii.gz
         └── MMWHS_evaluation_testdata_label_encrypt_1mm_forpublic
             └── nii/                # labels, .nii.gz
+
         """
-        raise NotImplementedError("MM-WHS dataset loading is not implemented yet.")
+        domain = "ct" if self.domain == "CT" else "mr"
+
+        data_path_images = (
+            Path(self.base_path)
+            / "MM-WHS 2017 Dataset"
+            / f"{domain}_{self.split}"
+        )
+        if self.split == "train":
+            data_path_labels = data_path_images
+        else:
+            data_path_labels = (
+                Path(self.base_path)
+                / "MMWHS_evaluation_testdata_label_encrypt_1mm_forpublic"
+                / "nii"
+            )
+        
+        data = []
+        # print(f"Loading MM-WHS dataset from {data_path_images} and labels from {data_path_labels}")
+        # print(list(data_path_images.glob("*")))
+        for img_file in sorted(data_path_images.glob("*_image.nii.gz")):
+            if not str(img_file).endswith(".nii.gz"):
+                print(f"Skipping non-NIfTI file: {img_file}")
+                continue
+                
+
+    
+            # Load image volume
+            img_nii = nib.load(str(img_file))
+            img_data = img_nii.get_fdata().astype(np.float32)
+
+            # Load label volume if available
+            if self.split == "train":
+                label_file = img_file.parent / img_file.name.replace("_image.nii.gz", "_label.nii.gz")
+                if label_file.exists():
+                    label_nii = nib.load(str(label_file))
+                    label_data = label_nii.get_fdata().astype(np.int64)
+                else:
+                    raise FileNotFoundError(f"Label file {label_file} does not exist.")
+            else:
+                label_file = data_path_labels / img_file.replace(
+                    "_image.nii.gz", "_label_encrypt_1mm.nii.gz"
+                )
+                if label_file.exists():
+                    label_nii = nib.load(str(label_file))
+                    label_data = label_nii.get_fdata().astype(np.int64)
+                else:
+                    raise FileNotFoundError(f"Label file {label_file} does not exist.")
+
+            sample = {
+                "image": torch.from_numpy(img_data),
+                "label": torch.from_numpy(label_data),
+            }
+            # print(sample)
+            if hasattr(self, "transform") and self.transform:
+                sample = self.transform(sample)
+
+            data.append(sample)
+
+
+        return data
+        # raise NotImplementedError("MM-WHS dataset loading is not implemented yet.")
