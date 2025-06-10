@@ -9,7 +9,9 @@ import torch
 from matplotlib import cm
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
-
+import napari
+from matplotlib.colors import ListedColormap
+from napari.utils.colormaps import DirectLabelColormap
 
 
 def _fetch_sample_from_dataloader(
@@ -28,37 +30,60 @@ def _fetch_sample_from_dataloader(
     raise IndexError(f"Sample index {sample_index} out of range.")
 
 
-def _get_organ_legend(seg_slice, seg_max, dataset_name="CHAOS_MRI"):
+def _get_organ_legend(seg_slice, seg_max, dataset_name):
     """
     Utility function to get legend labels and colors for organs present in the segmentation.
-    Handles different conventions for CHAOS_MRI, CHAOS_CT, and other datasets.
+    Handles different conventions for CHAOS_MRI, CHAOS_CT, MM-WHS (CT/MRI), and other datasets.
+    Uses the Set1 qualitative colormap (max 8-9 distinct colors).
     """
     legend_labels = []
     legend_colors = []
+    set1 = cm.get_cmap("Set1", 8)  # Set1 is qualitative, 8 distinct colors
+
     if dataset_name == "CHAOS_MRI":
-        organ_ranges = {
-            "Liver": (55, 70, 63),
-            "Right kidney": (110, 135, 126),
-            "Left kidney": (175, 200, 189),
-            "Spleen": (240, 255, 252),
-        }
-        for organ_name, (min_val, max_val, center_val) in organ_ranges.items():
+        organ_list = [
+            ("Liver", (55, 70, 63), 0),
+            ("Right kidney", (110, 135, 126), 1),
+            ("Left kidney", (175, 200, 189), 2),
+            ("Spleen", (240, 255, 252), 3),
+        ]
+        for organ_name, (min_val, max_val, _), color_idx in organ_list:
             if np.any((seg_slice >= min_val) & (seg_slice <= max_val)):
                 legend_labels.append(organ_name)
-                color_pos = center_val / seg_max if seg_max > 0 else 0
-                legend_colors.append(cm.jet(color_pos))
+                legend_colors.append(set1(color_idx))
     elif dataset_name == "CHAOS_CT":
         if np.any(seg_slice > 0):
             legend_labels.append("Liver")
-            legend_colors.append(cm.jet(0.5))
+            legend_colors.append(set1(0))
+    elif dataset_name in [
+        "MMWHS",
+        "MM-WHS",
+        "MMWHS_CT",
+        "MM-WHS_CT",
+        "MMWHS_MRI",
+        "MM-WHS_MRI",
+    ]:
+        mmwhs_labels = [
+            (500, "Left ventricle blood cavity", 0),
+            (600, "Right ventricle blood cavity", 1),
+            (420, "Left atrium blood cavity", 2),
+            (550, "Right atrium blood cavity", 3),
+            (205, "Myocardium of the left ventricle", 4),
+            (820, "Ascending aorta", 5),
+            (850, "Pulmonary artery", 6),
+        ]
+        for label_val, organ_name, color_idx in mmwhs_labels:
+            if np.any(seg_slice == label_val):
+                legend_labels.append(organ_name)
+                legend_colors.append(set1(color_idx))
     else:
         # Generic: just show unique nonzero labels
+        print(f"Warning: No specific legend for dataset {dataset_name}.")
         unique_labels = np.unique(seg_slice)
         unique_labels = unique_labels[unique_labels > 0]
-        for label in unique_labels:
+        for idx, label in enumerate(unique_labels):
             legend_labels.append(f"Label {int(label)}")
-            color_pos = label / seg_max if seg_max > 0 else 0
-            legend_colors.append(cm.jet(color_pos))
+            legend_colors.append(set1(idx % set1.N))
     return legend_labels, legend_colors
 
 
@@ -74,7 +99,6 @@ def visualize_sample_slice(
     import matplotlib.pyplot as plt
 
     img, seg = _fetch_sample_from_dataloader(dataloader, sample_index, device)
-    print(img.shape)
     # Handle (H, W, D) or (C, H, W, D)
     if img.ndim == 3:
         z = img.shape[-1] // 2
@@ -99,7 +123,7 @@ def visualize_sample_slice(
     overlay = np.zeros_like(seg_slice, dtype=np.float32)
     mask = seg_slice > 0
     overlay[mask] = seg_slice[mask]
-    cmap = cm.get_cmap("jet").copy()
+    cmap = cm.get_cmap("Set1").copy()
     cmap.set_bad(alpha=0)
     masked_overlay = np.ma.masked_where(overlay == 0, overlay)
     ax2.imshow(masked_overlay, cmap=cmap, alpha=0.4)
@@ -147,7 +171,7 @@ def visualize_sample(
     # Ensure axes is always a 2D array for consistent indexing
     if rows != cols:
         axes = np.array(axes).reshape(1, -1)
-   
+
     seg_max = seg.max()
 
     for z in range(num_slices):
@@ -167,10 +191,10 @@ def visualize_sample(
         overlay = np.zeros_like(seg_slice, dtype=np.float32)
         mask = seg_slice > 0
         overlay[mask] = seg_slice[mask]
-        cmap = cm.get_cmap("jet").copy()
+        cmap = cm.get_cmap("Set1").copy()
         cmap.set_bad(alpha=0)
         masked_overlay = np.ma.masked_where(overlay == 0, overlay)
-        
+
         ax.imshow(masked_overlay, cmap=cmap, alpha=0.4, vmin=0, vmax=seg_max)
         ax.set_title(f"Slice {z}")
         ax.axis("off")
@@ -211,7 +235,8 @@ def visualize_sample(
 
 def visualize_3d(
     dataloader: DataLoader,
-    sample_index: int = 0,
+    sample_index: int,
+    dataset_name: str,
     device: Optional[torch.device] = None,
 ):
     """
@@ -221,8 +246,8 @@ def visualize_3d(
         dataloader (DataLoader): yields batches with 'image' and 'label'.
         sample_index (int): index of the batch to visualize.
         device (torch.device, optional): computation device.
+        dataset_name (str): name of the dataset for legend labeling.
     """
-    import napari
 
     # Set device
     if device is None:
@@ -235,15 +260,38 @@ def visualize_3d(
             seg = batch["label"][0].to(device).cpu().numpy()
             break
 
+    # Rotate for correct orientation
+    img = np.rot90(img, k=1, axes=(0, 1))
+    seg = np.rot90(seg, k=1, axes=(0, 1))
+
+    # Prepare legend info
+    seg_max = seg.max()
+    legend_labels, legend_colors = _get_organ_legend(seg, seg_max, dataset_name)
+    # Prepare label color mapping for napari
+    # Create a matplotlib ListedColormap for segmentation labels
+
+    unique_labels = np.unique(seg)
+    label_color_dict = {}
+    for idx, label in enumerate(unique_labels):
+        if label == 0:
+            label_color_dict[int(label)] = (0, 0, 0, 0)  # transparent for background
+        else:
+            # Use Set1 qualitative colormap with 8 colors (exclude the last color)
+            set1 = cm.get_cmap("Set1", 9)
+            n_colors = 8  # Exclude the last color
+            color_idx = (idx - 1) % n_colors  # idx-1 because label==0 is background
+            color = set1(color_idx)
+            # Convert RGBA from 0-1 to 0-255 for napari
+            color = tuple(int(255 * c) for c in color)
+            label_color_dict[int(label)] = color
+    seg_cmap = DirectLabelColormap(color_dict=label_color_dict)
+
     # Create a Napari viewer
     viewer = napari.Viewer()
 
     # Add image and segmentation layers
-    img = np.rot90(img, k=1, axes=(0, 1))  # Rotate for correct orientation
-    seg = np.rot90(seg, k=1, axes=(0, 1))  # Rotate for correct orientation
-
     viewer.add_image(img, name="Image", colormap="gray", blending="additive")
-    viewer.add_labels(seg, name="Segmentation", opacity=0.5)
+    viewer.add_labels(seg, name="Segmentation", opacity=0.5, colormap=seg_cmap)
 
     # Start the Napari event loop
     napari.run()
