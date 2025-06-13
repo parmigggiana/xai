@@ -3,7 +3,8 @@ from monai.inferers import sliding_window_inference
 from monai.metrics import DiceMetric, HausdorffDistanceMetric
 from monai.networks.nets import SwinUNETR
 from torch.utils.data import DataLoader
-from src.modeling import Classifier
+
+from src.old_modeling import Classifier
 
 
 def evaluate_segmentation_performance(

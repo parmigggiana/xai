@@ -4,14 +4,14 @@ Interface module for evaluating volumetric segmentation performance using MONAI.
 
 from typing import Optional
 
+import matplotlib.pyplot as plt
+import napari
 import numpy as np
 import torch
 from matplotlib import cm
-import matplotlib.pyplot as plt
-from torch.utils.data import DataLoader
-import napari
 from matplotlib.colors import ListedColormap
 from napari.utils.colormaps import DirectLabelColormap
+from torch.utils.data import DataLoader
 
 
 def _fetch_sample_from_dataloader(

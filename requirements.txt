@@ -5,6 +5,6 @@ numpy
 nibabel
 pydicom
 PILlow
-napari
+napari[pyqt6, optional]
 matplotlib
-pyqt5
+open-clip-torch
