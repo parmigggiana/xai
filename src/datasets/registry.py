@@ -1,23 +1,17 @@
 import sys
 import inspect
-import random
 import torch
 import copy
 
 from torch.utils.data.dataset import random_split
 
 from src.datasets.cars import Cars
-from src.datasets.cifar10 import CIFAR10
-from src.datasets.cifar100 import CIFAR100
-from src.datasets.dtd import DTD
-from src.datasets.eurosat import EuroSAT, EuroSATVal
-from src.datasets.cars import GTSRB
-from src.datasets.imagenet import ImageNet
-from src.datasets.mnist import MNIST
-from src.datasets.resisc45 import RESISC45
-from src.datasets.stl10 import STL10
-from src.datasets.svhn import SVHN
-from src.datasets.sun397 import SUN397
+from src.datasets.chaos import CHAOS
+
+# from src.datasets.mmwhs import MMWHS
+# from src.datasets.apis import APIS
+# from src.datasets.totalsegmentator import TotalSegmentator
+# from src.datasets.oasis import OASIS
 
 registry = {
     name: obj
@@ -85,38 +79,17 @@ def split_train_into_train_val(
 
 
 def get_dataset(
-    dataset_name,
-    preprocess,
-    location,
-    batch_size=128,
-    num_workers=16,
-    val_fraction=0.1,
-    max_val_samples=5000,
+    dataset_name, location, preprocess=None, batch_size=128, num_workers=16, **kwargs
 ):
-    if dataset_name.endswith("Val"):
-        # Handle val splits
-        if dataset_name in registry:
-            dataset_class = registry[dataset_name]
-        else:
-            base_dataset_name = dataset_name.split("Val")[0]
-            base_dataset = get_dataset(
-                base_dataset_name, preprocess, location, batch_size, num_workers
-            )
-            dataset = split_train_into_train_val(
-                base_dataset,
-                dataset_name,
-                batch_size,
-                num_workers,
-                val_fraction,
-                max_val_samples,
-            )
-            return dataset
-    else:
-        assert (
-            dataset_name in registry
-        ), f"Unsupported dataset: {dataset_name}. Supported datasets: {list(registry.keys())}"
-        dataset_class = registry[dataset_name]
+    assert (
+        dataset_name in registry
+    ), f"Unsupported dataset: {dataset_name}. Supported datasets: {list(registry.keys())}"
+    dataset_class = registry[dataset_name]
     dataset = dataset_class(
-        preprocess, location=location, batch_size=batch_size, num_workers=num_workers
+        preprocess=preprocess,
+        location=location,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        **kwargs,
     )
     return dataset

@@ -36,8 +36,7 @@ def _get_organ_legend(seg_slice, seg_max, dataset_name):
     Handles different conventions for CHAOS_MRI, CHAOS_CT, MM-WHS (CT/MRI), and other datasets.
     Uses the Set1 qualitative colormap (max 8-9 distinct colors).
     """
-    legend_labels = []
-    legend_colors = []
+    legend = {}
     set1 = cm.get_cmap("Set1", 8)  # Set1 is qualitative, 8 distinct colors
 
     if dataset_name == "CHAOS_MRI":
@@ -49,12 +48,10 @@ def _get_organ_legend(seg_slice, seg_max, dataset_name):
         ]
         for organ_name, (min_val, max_val, _), color_idx in organ_list:
             if np.any((seg_slice >= min_val) & (seg_slice <= max_val)):
-                legend_labels.append(organ_name)
-                legend_colors.append(set1(color_idx))
+                legend[organ_name] = set1(color_idx)
     elif dataset_name == "CHAOS_CT":
         if np.any(seg_slice > 0):
-            legend_labels.append("Liver")
-            legend_colors.append(set1(0))
+            legend["Liver"] = set1(0)
     elif dataset_name in [
         "MMWHS",
         "MM-WHS",
@@ -74,31 +71,30 @@ def _get_organ_legend(seg_slice, seg_max, dataset_name):
         ]
         for label_val, organ_name, color_idx in mmwhs_labels:
             if np.any(seg_slice == label_val):
-                legend_labels.append(organ_name)
-                legend_colors.append(set1(color_idx))
+                legend[organ_name] = set1(color_idx)
     else:
         # Generic: just show unique nonzero labels
         print(f"Warning: No specific legend for dataset {dataset_name}.")
         unique_labels = np.unique(seg_slice)
         unique_labels = unique_labels[unique_labels > 0]
         for idx, label in enumerate(unique_labels):
-            legend_labels.append(f"Label {int(label)}")
-            legend_colors.append(set1(idx % set1.N))
-    return legend_labels, legend_colors
+            legend[label] = set1(idx % set1.N)
+    return legend
 
 
 def visualize_sample_slice(
-    dataloader: DataLoader,
-    sample_index: int = 0,
+    sample,
     device: Optional[torch.device] = None,
     dataset_name: str = "CHAOS_MRI",
+    rotate: int = 0,
+    flip_axis: int = -1,  # -1 for no flip, 0 for vertical, 1 for horizontal
 ) -> None:
     """
     Visualize a volumetric image sample and its segmentation mask (center slice).
     """
     import matplotlib.pyplot as plt
 
-    img, seg = _fetch_sample_from_dataloader(dataloader, sample_index, device)
+    img, seg = sample["image"], sample["label"]
     # Handle (H, W, D) or (C, H, W, D)
     if img.ndim == 3:
         z = img.shape[-1] // 2
@@ -112,8 +108,12 @@ def visualize_sample_slice(
         raise ValueError(f"Unsupported image shape: {img.shape}")
 
     _, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4))
-    img_slice = np.rot90(img_slice, k=1)
-    seg_slice = np.rot90(seg_slice, k=1)
+    img_slice = np.rot90(img_slice, k=rotate)
+    seg_slice = np.rot90(seg_slice, k=rotate)
+
+    if flip_axis != -1:
+        img_slice = np.flip(img_slice, axis=flip_axis)
+        seg_slice = np.flip(seg_slice, axis=flip_axis)
 
     ax1.imshow(img_slice, cmap="gray")
     ax1.set_title("Image Slice")
@@ -123,12 +123,12 @@ def visualize_sample_slice(
     overlay = np.zeros_like(seg_slice, dtype=np.float32)
     mask = seg_slice > 0
     overlay[mask] = seg_slice[mask]
-    cmap = cm.get_cmap("Set1").copy()
-    cmap.set_bad(alpha=0)
     masked_overlay = np.ma.masked_where(overlay == 0, overlay)
-    ax2.imshow(masked_overlay, cmap=cmap, alpha=0.4)
-    seg_max = seg_slice.max()
-    legend_labels, legend_colors = _get_organ_legend(seg_slice, seg_max, dataset_name)
+
+    legend = _get_organ_legend(seg_slice, seg_slice.max(), dataset_name)
+    legend_colors = ListedColormap([legend[label] for label in legend])
+    legend_labels = list(legend.keys())
+    ax2.imshow(masked_overlay, cmap=legend_colors, alpha=0.4)
     if legend_labels:
         legend_elements = [
             plt.Line2D(
@@ -140,7 +140,7 @@ def visualize_sample_slice(
                 markersize=10,
                 label=label,
             )
-            for label, color in zip(legend_labels, legend_colors)
+            for label, color in legend.items()
         ]
         ax2.legend(
             handles=legend_elements,
@@ -155,15 +155,14 @@ def visualize_sample_slice(
 
 
 def visualize_sample(
-    dataloader: DataLoader,
-    sample_index: int = 0,
+    sample,
     device: Optional[torch.device] = None,
     dataset_name: str = "CHAOS_MRI",
 ) -> None:
     """
     Visualize all slices of a volumetric image sample and its segmentation mask.
     """
-    img, seg = _fetch_sample_from_dataloader(dataloader, sample_index, device)
+    img, seg = sample["image"], sample["label"]
     num_slices = img.shape[-1]
     cols = min(4, num_slices)
     rows = (num_slices + cols - 1) // cols
@@ -191,10 +190,10 @@ def visualize_sample(
         overlay = np.zeros_like(seg_slice, dtype=np.float32)
         mask = seg_slice > 0
         overlay[mask] = seg_slice[mask]
-        cmap = cm.get_cmap("Set1").copy()
-        cmap.set_bad(alpha=0)
         masked_overlay = np.ma.masked_where(overlay == 0, overlay)
 
+        cmap = cm.get_cmap("Set1").copy()
+        cmap.set_bad(alpha=0)
         ax.imshow(masked_overlay, cmap=cmap, alpha=0.4, vmin=0, vmax=seg_max)
         ax.set_title(f"Slice {z}")
         ax.axis("off")
@@ -234,10 +233,11 @@ def visualize_sample(
 
 
 def visualize_3d(
-    dataloader: DataLoader,
-    sample_index: int,
+    sample,
     dataset_name: str,
     device: Optional[torch.device] = None,
+    rotate: int = 0,
+    flip_axis: int = -1,  # -1 for no flip, 0 for vertical, 1 for horizontal
 ):
     """
     Visualize a 3D volumetric image sample and its segmentation mask using 3D rendering.
@@ -249,24 +249,22 @@ def visualize_3d(
         dataset_name (str): name of the dataset for legend labeling.
     """
 
+    img, seg = sample["image"], sample["label"]
     # Set device
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Fetch the specified sample
-    for idx, batch in enumerate(dataloader):
-        if idx == sample_index:
-            img = batch["image"][0].to(device).cpu().numpy()
-            seg = batch["label"][0].to(device).cpu().numpy()
-            break
-
     # Rotate for correct orientation
-    img = np.rot90(img, k=1, axes=(0, 1))
-    seg = np.rot90(seg, k=1, axes=(0, 1))
+    img = np.rot90(img, k=rotate, axes=(0, 1))
+    seg = np.rot90(seg, k=rotate, axes=(0, 1))
+
+    if flip_axis != -1:
+        img = np.flip(img, axis=flip_axis + 1)
+        seg = np.flip(seg, axis=flip_axis + 1)
 
     # Prepare legend info
     seg_max = seg.max()
-    legend_labels, legend_colors = _get_organ_legend(seg, seg_max, dataset_name)
+    legend = _get_organ_legend(seg, seg_max, dataset_name)
     # Prepare label color mapping for napari
     # Create a matplotlib ListedColormap for segmentation labels
 
