@@ -1,16 +1,17 @@
-import os
-import torch
-import json
-import glob
 import collections
+import glob
+import os
 import random
+from typing import Iterable, Optional
 
+import napari
 import numpy as np
-
-from tqdm import tqdm
-
+import torch
 import torchvision.datasets as datasets
-from torch.utils.data import Dataset, DataLoader, Sampler
+from matplotlib import cm
+from matplotlib.colors import ListedColormap
+from torch.utils.data import DataLoader, Dataset, Sampler
+from tqdm import tqdm
 
 
 class SubsetSampler(Sampler):
@@ -39,6 +40,151 @@ class ImageFolderWithPaths(datasets.ImageFolder):
     def __getitem__(self, index):
         image, label = super(ImageFolderWithPaths, self).__getitem__(index)
         return {"images": image, "labels": label, "image_paths": self.samples[index][0]}
+
+
+class BaseDataset:
+    def _get_organ_legend(self, seg_slice):
+
+        print(f"Warning: No specific legend for dataset {type(self)}.")
+        set1 = cm.get_cmap("Set1", 8)  # Set1 is qualitative, 8 distinct colors
+        legend = {}
+        unique_labels = np.unique(seg_slice)
+        unique_labels = unique_labels[unique_labels > 0]
+        for idx, label in enumerate(unique_labels):
+            legend[label] = set1(idx % set1.N)
+        return legend
+
+    def visualize_3d(self, sample):
+        """
+        Visualize a 3D volumetric image sample and its segmentation mask using 3D rendering.
+
+        Args:
+            sample (dict): contains 'image' and 'label'.
+        """
+        self._visualize_3d(sample)
+
+    def _visualize_3d(
+        self,
+        sample,
+        rotate: int = 0,
+        flip_axis: int = None,
+    ):
+        """
+        Visualize a 3D volumetric image sample and its segmentation mask using 3D rendering.
+
+        Args:
+            dataloader (DataLoader): yields batches with 'image' and 'label'.
+            sample_index (int): index of the batch to visualize.
+            device (torch.device, optional): computation device.
+            dataset_name (str): name of the dataset for legend labeling.
+        """
+
+        img, seg = sample["image"], sample["label"]
+
+        # Rotate for correct orientation
+        img = np.rot90(img, k=rotate, axes=(0, 1))
+        seg = np.rot90(seg, k=rotate, axes=(0, 1))
+
+        if flip_axis is not None:
+            if isinstance(flip_axis, int):
+                flip_axis = (flip_axis,)
+            for axis in flip_axis:
+                img = np.flip(img, axis=axis)
+                seg = np.flip(seg, axis=axis)
+
+        # Create a Napari viewer
+        viewer = napari.Viewer()
+
+        # Add image and segmentation layers
+        viewer.add_image(img, name="Image", colormap="gray", blending="additive")
+        viewer.add_labels(seg, name="Segmentation", opacity=0.5)
+
+        # Start the Napari event loop
+        napari.run()
+
+    def visualize_sample_slice(
+        self,
+        sample,
+    ):
+        """
+        Visualize a volumetric image sample and its segmentation mask (center slice).
+        """
+        self._visualize_sample_slice(sample)
+
+    def _visualize_sample_slice(
+        self,
+        sample,
+        rotate: int = 0,
+        flip_axis: int = None,
+    ) -> None:
+        """
+        Visualize a volumetric image sample and its segmentation mask (center slice).
+        """
+        import matplotlib.pyplot as plt
+
+        img, seg = sample["image"], sample["label"]
+        # Handle (H, W, D) or (C, H, W, D)
+        if img.ndim == 3:
+            z = img.shape[-1] // 2
+            img_slice = img[..., z]
+            seg_slice = seg[..., z]
+        elif img.ndim == 4:
+            z = img.shape[-1] // 2
+            img_slice = img[0, ..., z]
+            seg_slice = seg[0, ..., z]
+        else:
+            raise ValueError(f"Unsupported image shape: {img.shape}")
+
+        _, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4))
+        img_slice = np.rot90(img_slice, k=rotate)
+        seg_slice = np.rot90(seg_slice, k=rotate)
+
+        if flip_axis is not None:
+            if isinstance(flip_axis, int):
+                flip_axis = (flip_axis,)
+            print(f"Flipping along axes: {flip_axis}")
+            for axis in flip_axis:
+                print(f"Flipping along axis {axis}")
+                img_slice = np.flip(img_slice, axis=axis)
+                seg_slice = np.flip(seg_slice, axis=axis)
+
+        ax1.imshow(img_slice, cmap="gray")
+        ax1.set_title("Image Slice")
+        ax1.axis("off")
+
+        ax2.imshow(img_slice, cmap="gray")
+        overlay = np.zeros_like(seg_slice, dtype=np.float32)
+        mask = seg_slice > 0
+        overlay[mask] = seg_slice[mask]
+        masked_overlay = np.ma.masked_where(overlay == 0, overlay)
+
+        legend = self._get_organ_legend(seg_slice)
+        legend_colors = ListedColormap([legend[label] for label in legend])
+        legend_labels = list(legend.keys())
+        ax2.imshow(masked_overlay, cmap=legend_colors, alpha=0.4)
+        if legend_labels:
+            legend_elements = [
+                plt.Line2D(
+                    [0],
+                    [0],
+                    marker="s",
+                    color="w",
+                    markerfacecolor=color,
+                    markersize=10,
+                    label=label,
+                )
+                for label, color in legend.items()
+            ]
+            ax2.legend(
+                handles=legend_elements,
+                loc="upper right",
+                frameon=True,
+                facecolor="white",
+            )
+        ax2.set_title("Overlay Segmentation")
+        ax2.axis("off")
+        plt.tight_layout()
+        plt.show()
 
 
 def maybe_dictionarize(batch):

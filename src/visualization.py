@@ -14,23 +14,7 @@ from napari.utils.colormaps import DirectLabelColormap
 from torch.utils.data import DataLoader
 
 
-def _fetch_sample_from_dataloader(
-    dataloader: DataLoader, sample_index: int, device: Optional[torch.device] = None
-):
-    """
-    Utility function to fetch a single sample (image, label) from a dataloader.
-    """
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    for idx, batch in enumerate(dataloader):
-        if idx == sample_index:
-            img = batch["image"][0].to(device).cpu().numpy()
-            seg = batch["label"][0].to(device).cpu().numpy()
-            return img, seg
-    raise IndexError(f"Sample index {sample_index} out of range.")
-
-
-def _get_organ_legend(seg_slice, seg_max, dataset_name):
+def _get_organ_legend(seg_slice, dataset_name):
     """
     Utility function to get legend labels and colors for organs present in the segmentation.
     Handles different conventions for CHAOS_MRI, CHAOS_CT, MM-WHS (CT/MRI), and other datasets.

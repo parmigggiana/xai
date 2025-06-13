@@ -1,10 +1,14 @@
 from pathlib import Path
-from typing import Callable, Optional, Any, Tuple
+from typing import Any, Callable, Optional, Tuple
+
 import numpy as np
-import torch
-from torchvision.datasets.vision import VisionDataset
-from PIL import Image
 import pydicom
+import torch
+from matplotlib import cm
+from PIL import Image
+from torchvision.datasets.vision import VisionDataset
+
+from src.datasets.common import BaseDataset
 
 chaos_labels_mr = [
     "Background",
@@ -112,7 +116,7 @@ class PyTorchCHAOS(VisionDataset):
         return sample
 
 
-class CHAOS:
+class CHAOS(BaseDataset):
     def __init__(
         self,
         location,
@@ -140,9 +144,42 @@ class CHAOS:
             location, domain, "test", preprocess  # , download=True
         )
         self.test_loader = torch.utils.data.DataLoader(
-            self.test_dataset, batch_size=batch_size, num_workers=num_workers
+            self.test_dataset,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            collate_fn=lambda x: x[0],
         )
         idx_to_class = dict((v, k) for k, v in self.train_dataset.class_to_idx.items())
         self.classnames = [
             idx_to_class[i].replace("_", " ") for i in range(len(idx_to_class))
         ]
+        self.domain = domain
+
+    def visualize_3d(self, sample):
+        self._visualize_3d(
+            sample,
+            rotate=0,
+            flip_axis=((3, 2) if self.domain == "CT" else 2),
+        )
+
+    def visualize_sample_slice(self, sample):
+        return self._visualize_sample_slice(sample, 0, flip_axis=1)
+
+    def _get_organ_legend(self, seg_slice):
+        legend = {}
+        set1 = cm.get_cmap("Set1", 8)  # Set1 is qualitative, 8 distinct colors
+
+        if self.domain in ["MR", "MRI"]:
+            organ_list = [
+                ("Liver", (55, 70, 63), 0),
+                ("Right kidney", (110, 135, 126), 1),
+                ("Left kidney", (175, 200, 189), 2),
+                ("Spleen", (240, 255, 252), 3),
+            ]
+            for organ_name, (min_val, max_val, _), color_idx in organ_list:
+                if np.any((seg_slice >= min_val) & (seg_slice <= max_val)):
+                    legend[organ_name] = set1(color_idx)
+        elif self.domain == "CT":
+            legend["Liver"] = set1(0)
+
+        return legend

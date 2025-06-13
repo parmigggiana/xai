@@ -1,14 +1,14 @@
-import sys
-import inspect
-import torch
 import copy
+import inspect
+import sys
 
+import torch
 from torch.utils.data.dataset import random_split
 
 from src.datasets.cars import Cars
 from src.datasets.chaos import CHAOS
+from src.datasets.mmwhs import MMWHS
 
-# from src.datasets.mmwhs import MMWHS
 # from src.datasets.apis import APIS
 # from src.datasets.totalsegmentator import TotalSegmentator
 # from src.datasets.oasis import OASIS
