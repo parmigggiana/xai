@@ -95,9 +95,16 @@ class BaseDataset:
         # Create a Napari viewer
         viewer = napari.Viewer()
 
-        # Add image and segmentation layers
-        viewer.add_image(img, name="Image", colormap="gray", blending="additive")
-        viewer.add_labels(seg, name="Segmentation", opacity=0.5)
+        # Scale z-axis to make layers appear taller in 3D view
+        if self.domain in ["MR", "MRI"]:
+            z_scale = 5.0  # Increase this value to make layers taller
+        scale = (1.0, 1.0, z_scale) if img.ndim == 3 else (1.0, 1.0, 1.0, z_scale)
+
+        # Add image and segmentation layers with scaling
+        viewer.add_image(
+            img, name="Image", colormap="gray", blending="additive", scale=scale
+        )
+        viewer.add_labels(seg, name="Segmentation", opacity=0.5, scale=scale)
 
         # Start the Napari event loop
         napari.run()
