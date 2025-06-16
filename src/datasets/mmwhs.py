@@ -42,6 +42,7 @@ class PyTorchMMWHS(VisionDataset):
         self.domain = domain
         self.split = split
         self.transform = transform
+        self.slice_2d = slice_2d
 
         self.data_path_images = (
             Path(self.base_path) / "MM-WHS 2017 Dataset" / f"{self.domain}_{self.split}"
@@ -78,12 +79,22 @@ class PyTorchMMWHS(VisionDataset):
                 if not label_file.exists():
                     raise FileNotFoundError(f"Label file {label_file} does not exist.")
 
-            samples.append(
-                {
-                    "image_path": img_file,
-                    "label_path": label_file,
-                }
-            )
+            if self.slice_2d:
+                for slice_n in range(nib.load(img_file).header["dim"][3]):
+                    samples.append(
+                        {
+                            "image_path": img_file,
+                            "slice_n": slice_n,
+                            "label_path": label_file,
+                        }
+                    )
+            else:
+                samples.append(
+                    {
+                        "image_path": img_file,
+                        "label_path": label_file,
+                    }
+                )
 
         return samples
 
@@ -112,11 +123,22 @@ class PyTorchMMWHS(VisionDataset):
             if sample["label_path"] is not None
             else None
         )
-
-        data = {
-            "image": torch.from_numpy(img_data),
-            "label": torch.from_numpy(label_data) if label_data is not None else None,
-        }
+        if self.slice_2d:
+            data = {
+                "image": torch.from_numpy(img_data[:, :, sample["slice_n"]]),
+                "label": (
+                    torch.from_numpy(label_data[:, :, sample["slice_n"]])
+                    if label_data is not None
+                    else None
+                ),
+            }
+        else:
+            data = {
+                "image": torch.from_numpy(img_data),
+                "label": (
+                    torch.from_numpy(label_data) if label_data is not None else None
+                ),
+            }
 
         if self.transform:
             data = self.transform(data)
@@ -132,7 +154,7 @@ class MMWHS(BaseDataset):
         slice_2d: bool = False,
         preprocess=None,
         batch_size=1,
-        num_workers=16,
+        num_workers=0,
     ):
         """
         MMWHS Test does not have labels, so we only use it for inference.

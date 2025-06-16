@@ -17,6 +17,7 @@ chaos_labels_mr = [
     "Left kidney",
     "Spleen",
 ]
+
 chaos_labels_ct = [
     "Background",
     "Liver",
@@ -123,7 +124,7 @@ class CHAOS(BaseDataset):
         domain: str,
         preprocess=None,
         batch_size=1,
-        num_workers=16,
+        num_workers=0,
     ):
         """
         CHAOS Test does not have labels, so we only use it for inference.

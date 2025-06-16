@@ -2,7 +2,6 @@ import collections
 import glob
 import os
 import random
-from typing import Iterable, Optional
 
 import napari
 import numpy as np
@@ -63,6 +62,7 @@ class BaseDataset:
         """
         self._visualize_3d(sample)
 
+    @torch.no_grad()
     def _visualize_3d(
         self,
         sample,
@@ -81,6 +81,9 @@ class BaseDataset:
 
         img, seg = sample["image"], sample["label"]
 
+        if img.ndim <= 3:
+            return
+
         # Rotate for correct orientation
         img = np.rot90(img, k=rotate, axes=(0, 1))
         seg = np.rot90(seg, k=rotate, axes=(0, 1))
@@ -96,8 +99,10 @@ class BaseDataset:
         viewer = napari.Viewer()
 
         # Scale z-axis to make layers appear taller in 3D view
+        z_scale = 1.0
         if self.domain in ["MR", "MRI"]:
             z_scale = 5.0  # Increase this value to make layers taller
+
         scale = (1.0, 1.0, z_scale) if img.ndim == 3 else (1.0, 1.0, 1.0, z_scale)
 
         # Add image and segmentation layers with scaling
@@ -118,6 +123,7 @@ class BaseDataset:
         """
         self._visualize_sample_slice(sample)
 
+    @torch.no_grad()
     def _visualize_sample_slice(
         self,
         sample,
@@ -139,6 +145,9 @@ class BaseDataset:
             z = img.shape[-1] // 2
             img_slice = img[0, ..., z]
             seg_slice = seg[0, ..., z]
+        elif img.ndim == 2:
+            img_slice = img
+            seg_slice = seg
         else:
             raise ValueError(f"Unsupported image shape: {img.shape}")
 
