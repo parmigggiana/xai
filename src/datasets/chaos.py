@@ -39,6 +39,7 @@ class PyTorchCHAOS(VisionDataset):
         self,
         base_path: str,
         domain: str,
+        slice_2d: bool = False,
         split: str = "train",
         transform: Optional[Callable] = None,
     ) -> None:
@@ -51,6 +52,7 @@ class PyTorchCHAOS(VisionDataset):
         self.domain = domain
         self.split = split
         self.transform = transform
+        self.slice_2d = slice_2d
 
         split_dir = "Test_Sets" if self.split == "test" else "Train_Sets"
         domain_dir = "CT" if self.domain == "CT" else "MR"
@@ -71,44 +73,66 @@ class PyTorchCHAOS(VisionDataset):
         for patient_id in sorted(self.data_path.iterdir()):
             if not patient_id.is_dir():
                 continue
-            samples.append(patient_id)
+            if self.slice_2d:
+                img_path, seg_path = self._get_paths(patient_id, self.domain)
+                img_files = sorted(img_path.glob("*.dcm"))
+                seg_files = sorted(seg_path.glob("*.png"))
+                for img_file, seg_file in zip(img_files, seg_files):
+                    if img_file.suffix == ".dcm" and seg_file.suffix == ".png":
+                        samples.append((img_file, seg_file))
+            else:
+                samples.append(patient_id)
 
         return samples
 
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> Tuple[Any, Any]:
-        patient_id = self.samples[idx]
-        if self.domain == "CT":
+    def _get_paths(self, patient_id: Path, domain: str) -> Tuple[Path, Path]:
+        if domain == "CT":
             img_path = patient_id / "DICOM_anon"
             seg_path = patient_id / "Ground"
         else:
             img_path = patient_id / "T2SPIR" / "DICOM_anon"
             seg_path = patient_id / "T2SPIR" / "Ground"
+        return img_path, seg_path
 
-        img_files = sorted(img_path.glob("*.dcm"))
-        seg_files = sorted(seg_path.glob("*.png"))
-        img_slices = [
-            pydicom.dcmread(img_file).pixel_array.astype(np.float32)
-            for img_file in img_files
-            if img_file.suffix == ".dcm"
-        ]
-
-        seg_slices = [
-            np.array(Image.open(seg_file)).astype(np.int64)
-            for seg_file in seg_files
-            if seg_file.suffix == ".png"
-        ]
-        img = np.stack(img_slices, axis=-1)
-        if self.split == "train":
-            seg = np.stack(seg_slices, axis=-1)
+    def __getitem__(self, idx: int) -> Tuple[Any, Any]:
+        if self.slice_2d:
+            img_file, seg_file = self.samples[idx]
+            img = pydicom.dcmread(img_file).pixel_array.astype(np.float32)
+            seg = (
+                np.array(Image.open(seg_file)).astype(np.int64)
+                if self.split == "train"
+                else None
+            )
+            # print(img.shape)
         else:
-            seg = None
+            patient_id = self.samples[idx]
+            img_path, seg_path = self._get_paths(patient_id, self.domain)
+
+            img_files = sorted(img_path.glob("*.dcm"))
+            seg_files = sorted(seg_path.glob("*.png"))
+            img_slices = [
+                pydicom.dcmread(img_file).pixel_array.astype(np.float32)
+                for img_file in img_files
+                if img_file.suffix == ".dcm"
+            ]
+
+            seg_slices = [
+                np.array(Image.open(seg_file)).astype(np.int64)
+                for seg_file in seg_files
+                if seg_file.suffix == ".png"
+            ]
+            img = np.stack(img_slices, axis=-1)
+            if self.split == "train":
+                seg = np.stack(seg_slices, axis=-1)
+            else:
+                seg = None
 
         sample = {
-            "image": torch.from_numpy(img)[None],
-            "label": torch.from_numpy(seg)[None] if seg is not None else None,
+            "image": torch.from_numpy(img),
+            "label": torch.from_numpy(seg) if seg is not None else None,
         }
 
         if self.transform:
@@ -122,6 +146,7 @@ class CHAOS(BaseDataset):
         self,
         location,
         domain: str,
+        slice_2d: bool = False,
         preprocess=None,
         batch_size=1,
         num_workers=0,
@@ -131,7 +156,7 @@ class CHAOS(BaseDataset):
         """
 
         self.train_dataset = PyTorchCHAOS(
-            location, domain, "train", preprocess  # , download=True
+            location, domain, slice_2d, "train", preprocess  # , download=True
         )
         self.train_loader = torch.utils.data.DataLoader(
             self.train_dataset,
@@ -142,7 +167,7 @@ class CHAOS(BaseDataset):
         )
 
         self.test_dataset = PyTorchCHAOS(
-            location, domain, "test", preprocess  # , download=True
+            location, domain, slice_2d, "test", preprocess  # , download=True
         )
         self.test_loader = torch.utils.data.DataLoader(
             self.test_dataset,
@@ -160,7 +185,11 @@ class CHAOS(BaseDataset):
         self._visualize_3d(
             sample,
             rotate=0,
-            flip_axis=((3, 2) if self.domain == "CT" else 2),
+            flip_axis=(
+                (3, 2)
+                if (self.domain == "CT" and not self.train_dataset.slice_2d)
+                else 2
+            ),
         )
 
     def visualize_sample_slice(self, sample):

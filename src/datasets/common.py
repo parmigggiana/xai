@@ -80,8 +80,8 @@ class BaseDataset:
         """
 
         img, seg = sample["image"], sample["label"]
-
-        if img.ndim <= 3:
+        # print(img.shape)
+        if img.ndim < 3:
             return
 
         # Rotate for correct orientation
