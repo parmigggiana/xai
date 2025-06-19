@@ -37,7 +37,6 @@ class PyTorchCHAOS(VisionDataset):
 
     def __init__(
         self,
-        *,
         base_path: str,
         domain: str,
         slice_2d: bool = False,
@@ -156,7 +155,6 @@ class PyTorchCHAOS(VisionDataset):
 class CHAOS(BaseDataset):
     def __init__(
         self,
-        *,
         location,
         domain: str,
         slice_2d: bool = False,

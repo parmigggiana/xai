@@ -80,7 +80,6 @@ def split_train_into_train_val(
 
 def get_dataset(
     dataset_name,
-    *,
     base_path,
     preprocess=None,
     batch_size=128,
