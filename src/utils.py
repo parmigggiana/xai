@@ -11,8 +11,6 @@ import torch
 import torch.nn
 from torch.utils.data import Dataset
 
-from src.dataset import CHAOSDataset, MMWHSDataset
-
 
 def assign_learning_rate(param_group, new_lr):
     param_group["lr"] = new_lr
@@ -102,32 +100,6 @@ class LabelSmoothing(torch.nn.Module):
 
 
 ######### Added #########
-
-
-def get_dataset(
-    dataset_name: str, domain: str, is_train: bool = True, base_path="data/"
-) -> Dataset:
-    """
-    Get the dataset path for a given dataset name.
-
-    Args:
-        dataset_name (str): Name of the dataset.
-        is_train (bool): Whether to get the training or validation dataset path.
-
-    Returns:
-        str: Path to the dataset.
-    """
-    dataset_path = Path(base_path) / dataset_name
-    split = "train" if is_train else "test"
-    dataset_path.mkdir(parents=True, exist_ok=True)
-    download_and_extract_dataset(dataset_name, base_path)
-    match dataset_name:
-        case "CHAOS":
-            return CHAOSDataset(base_path=dataset_path, domain=domain, split=split)
-        case "MM-WHS":
-            return MMWHSDataset(base_path=dataset_path, domain=domain, split=split)
-        case _:
-            raise ValueError(f"Unknown dataset: {dataset_name}")
 
 
 def download_and_extract_dataset(dataset: str, base_path: str = "data/"):

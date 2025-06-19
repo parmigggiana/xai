@@ -7,8 +7,8 @@ import torch
 import torch.nn.functional as F
 
 from src import utils
-from sklearn.metrics import jaccard_score
-import numpy as np
+
+# from sklearn.metrics import jaccard_score
 from monai.inferers import sliding_window_inference
 from monai.metrics import DiceMetric, HausdorffDistanceMetric
 
