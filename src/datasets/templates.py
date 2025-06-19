@@ -200,7 +200,6 @@ svhn_template = [
     lambda c: f'a photo of the number: "{c}".',
 ]
 
-
 dataset_to_template = {
     "Cars": cars_template,
     "CIFAR10": cifar10_template,

@@ -10,6 +10,7 @@ import torchvision.datasets as datasets
 from matplotlib import cm
 from matplotlib.colors import ListedColormap
 from torch.utils.data import DataLoader, Dataset, Sampler
+from src.modelseg import ImageSegmenter
 from tqdm import tqdm
 
 
@@ -201,6 +202,11 @@ class BaseDataset:
         ax2.axis("off")
         plt.tight_layout()
         plt.show()
+
+    def get_model(self) -> ImageSegmenter:
+        raise NotImplementedError(
+            "This method should be implemented in the subclass to return the model."
+        )
 
 
 def maybe_dictionarize(batch):

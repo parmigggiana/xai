@@ -37,11 +37,13 @@ class PyTorchCHAOS(VisionDataset):
 
     def __init__(
         self,
+        *,
         base_path: str,
         domain: str,
         slice_2d: bool = False,
         split: str = "train",
         transform: Optional[Callable] = None,
+        liver_only: bool = False,
     ) -> None:
         domain = domain.upper()
         split = split.lower()
@@ -53,6 +55,7 @@ class PyTorchCHAOS(VisionDataset):
         self.split = split
         self.transform = transform
         self.slice_2d = slice_2d
+        self.liver_only = liver_only
 
         split_dir = "Test_Sets" if self.split == "test" else "Train_Sets"
         domain_dir = "CT" if self.domain == "CT" else "MR"
@@ -106,6 +109,10 @@ class PyTorchCHAOS(VisionDataset):
                 if self.split == "train"
                 else None
             )
+            if self.liver_only and self.domain == "MR":
+                # Filter out non-liver labels
+                seg = np.where((seg >= 55) & (seg <= 70), seg, 0)
+
             # print(img.shape)
         else:
             patient_id = self.samples[idx]
@@ -124,6 +131,11 @@ class PyTorchCHAOS(VisionDataset):
                 for seg_file in seg_files
                 if seg_file.suffix == ".png"
             ]
+            if self.liver_only and self.domain == "MR":
+                # Filter out non-liver labels
+                seg_slices = [
+                    np.where((seg >= 55) & (seg <= 70), seg, 0) for seg in seg_slices
+                ]
             img = np.stack(img_slices, axis=-1)
             if self.split == "train":
                 seg = np.stack(seg_slices, axis=-1)
@@ -144,9 +156,11 @@ class PyTorchCHAOS(VisionDataset):
 class CHAOS(BaseDataset):
     def __init__(
         self,
+        *,
         location,
         domain: str,
         slice_2d: bool = False,
+        liver_only: bool = False,
         preprocess=None,
         batch_size=1,
         num_workers=0,
@@ -156,7 +170,12 @@ class CHAOS(BaseDataset):
         """
 
         self.train_dataset = PyTorchCHAOS(
-            location, domain, slice_2d, "train", preprocess  # , download=True
+            location,
+            domain,
+            slice_2d,
+            "train",
+            preprocess,
+            liver_only=liver_only,  # , download=True
         )
         self.train_loader = torch.utils.data.DataLoader(
             self.train_dataset,
@@ -167,7 +186,12 @@ class CHAOS(BaseDataset):
         )
 
         self.test_dataset = PyTorchCHAOS(
-            location, domain, slice_2d, "test", preprocess  # , download=True
+            location,
+            domain,
+            slice_2d,
+            "test",
+            preprocess,
+            liver_only=liver_only,  # , download=True
         )
         self.test_loader = torch.utils.data.DataLoader(
             self.test_dataset,

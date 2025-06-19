@@ -5,6 +5,8 @@ numpy
 nibabel
 pydicom
 PILlow
-napari[pyqt6, optional]
-matplotlib
+napari[pyqt6, optional]>=0.6
+matplotlib>=3.10
 open-clip-torch
+
+git+https://github.com/bowang-lab/MedSAM2.git

@@ -66,3 +66,30 @@ def get_classification_head(args, dataset):
     os.makedirs(args.save, exist_ok=True)
     classification_head.save(filename)
     return classification_head
+
+
+def get_segmentation_head(dataset, domain, slice_2d, save_path, cache_dir):
+    filename = os.path.join(
+        save_path, f"head_{dataset}_{domain}_{'2d' if slice_2d else '3d'}.pt"
+    )
+    if os.path.exists(filename):
+        print(
+            f"Segmentation head for {dataset} {domain} {'2D' if slice_2d else '3D'} exists at {filename}"
+        )
+        return ClassificationHead.load(filename)
+    print(
+        f"Did not find segmentation head for {dataset} {domain} {'2D' if slice_2d else '3D'} at {filename}, building one from scratch."
+    )
+
+    if slice_2d:
+        base_encoder = "ViT-B-32"
+    else:
+        base_encoder = "RN50"
+
+    model = ImageEncoder(model=base_encoder, keep_lang=True, cache_dir=cache_dir).model
+    template = get_templates(dataset)
+    segmentation_head = build_segmentation_head()
+
+    os.makedirs(save_path, exist_ok=True)
+    segmentation_head.save(filename)
+    return segmentation_head

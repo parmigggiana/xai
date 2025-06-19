@@ -1,5 +1,6 @@
 import copy
 import inspect
+from pathlib import Path
 import sys
 
 import torch
@@ -10,7 +11,6 @@ from src.datasets.chaos import CHAOS
 from src.datasets.mmwhs import MMWHS
 
 # from src.datasets.apis import APIS
-# from src.datasets.totalsegmentator import TotalSegmentator
 # from src.datasets.oasis import OASIS
 
 registry = {
@@ -79,12 +79,19 @@ def split_train_into_train_val(
 
 
 def get_dataset(
-    dataset_name, location, preprocess=None, batch_size=128, num_workers=16, **kwargs
+    dataset_name,
+    *,
+    base_path,
+    preprocess=None,
+    batch_size=128,
+    num_workers=16,
+    **kwargs,
 ):
     assert (
         dataset_name in registry
     ), f"Unsupported dataset: {dataset_name}. Supported datasets: {list(registry.keys())}"
     dataset_class = registry[dataset_name]
+    location = Path(base_path) / dataset_name
     dataset = dataset_class(
         preprocess=preprocess,
         location=location,
