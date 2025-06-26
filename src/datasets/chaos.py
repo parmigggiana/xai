@@ -166,6 +166,10 @@ class CHAOS(BaseDataset):
         """
         CHAOS Test does not have labels, so we only use it for inference.
         """
+        super().__init__()
+        self.domain = domain
+        self.slice_2d = slice_2d
+        self.liver_only = liver_only
 
         self.train_dataset = PyTorchCHAOS(
             location,
@@ -180,7 +184,6 @@ class CHAOS(BaseDataset):
             shuffle=True,
             batch_size=batch_size,
             num_workers=num_workers,
-            collate_fn=lambda x: x[0],
         )
 
         self.test_dataset = PyTorchCHAOS(
@@ -195,13 +198,37 @@ class CHAOS(BaseDataset):
             self.test_dataset,
             batch_size=batch_size,
             num_workers=num_workers,
-            collate_fn=lambda x: x[0],
         )
+
+        # Set up class information
         idx_to_class = dict((v, k) for k, v in self.train_dataset.class_to_idx.items())
         self.classnames = [
             idx_to_class[i].replace("_", " ") for i in range(len(idx_to_class))
         ]
-        self.domain = domain
+
+        if self.domain == "CT":
+            self.num_classes = len(chaos_labels_ct)
+        else:
+            self.num_classes = len(chaos_labels_mr)
+
+    def get_model(self):
+        """Return a Medical3DSegmenter with semantic guidance for CHAOS dataset."""
+        from src.semantic_segmentation import (
+            Medical3DSegmenter,
+            CHAOS_CLASS_DESCRIPTIONS,
+        )
+
+        class_descriptions = CHAOS_CLASS_DESCRIPTIONS[self.domain]
+        num_classes = len(class_descriptions)
+
+        model = Medical3DSegmenter(
+            encoder_type="swin_unetr",
+            num_classes=num_classes,
+            class_descriptions=class_descriptions,
+            pretrained=True,
+        )
+        model.dataset = self
+        return model
 
     def visualize_3d(self, sample):
         self._visualize_3d(

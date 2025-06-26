@@ -1,13 +1,13 @@
 import copy
 import inspect
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import torch
 from torch.utils.data.dataset import random_split
 
-from src.datasets.cars import Cars
 from src.datasets.chaos import CHAOS
+from src.datasets.common import BaseDataset
 from src.datasets.mmwhs import MMWHS
 
 # from src.datasets.apis import APIS
@@ -79,18 +79,15 @@ def split_train_into_train_val(
 
 
 def get_dataset(
-    dataset_name,
-    base_path,
-    preprocess=None,
-    batch_size=128,
-    num_workers=16,
-    **kwargs,
-):
+    dataset_name, base_path, preprocess=None, batch_size=128, num_workers=16, **kwargs
+) -> BaseDataset:
     assert (
         dataset_name in registry
     ), f"Unsupported dataset: {dataset_name}. Supported datasets: {list(registry.keys())}"
     dataset_class = registry[dataset_name]
-    location = Path(base_path) / dataset_name
+    if isinstance(base_path, str):
+        base_path = Path(base_path)
+    location = base_path / dataset_name
     dataset = dataset_class(
         preprocess=preprocess,
         location=location,

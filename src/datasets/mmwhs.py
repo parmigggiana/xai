@@ -80,14 +80,21 @@ class PyTorchMMWHS(VisionDataset):
                     raise FileNotFoundError(f"Label file {label_file} does not exist.")
 
             if self.slice_2d:
-                for slice_n in range(nib.load(img_file).header["dim"][3]):
-                    samples.append(
-                        {
-                            "image_path": img_file,
-                            "slice_n": slice_n,
-                            "label_path": label_file,
-                        }
-                    )
+                # For 2D slicing, we need to know the number of slices
+                try:
+                    img_header = nib.load(str(img_file)).header
+                    num_slices = img_header.get_data_shape()[2]  # Z dimension
+                    for slice_n in range(num_slices):
+                        samples.append(
+                            {
+                                "image_path": img_file,
+                                "slice_n": slice_n,
+                                "label_path": label_file,
+                            }
+                        )
+                except Exception as e:
+                    print(f"Error loading {img_file}: {e}")
+                    continue
             else:
                 samples.append(
                     {
@@ -159,7 +166,7 @@ class MMWHS(BaseDataset):
         """
         MMWHS Test does not have labels, so we only use it for inference.
         """
-
+        super().__init__()
         self.train_dataset = PyTorchMMWHS(
             location, domain, "train", preprocess, slice_2d=slice_2d
         )
@@ -168,20 +175,44 @@ class MMWHS(BaseDataset):
             shuffle=True,
             batch_size=batch_size,
             num_workers=num_workers,
-            collate_fn=lambda x: x[0],
+            # collate_fn=lambda x: x[0] if len(x) == 1 else x,
         )
 
         self.test_dataset = PyTorchMMWHS(
             location, domain, "test", preprocess, slice_2d=slice_2d
         )
         self.test_loader = torch.utils.data.DataLoader(
-            self.test_dataset, batch_size=batch_size, num_workers=num_workers
+            self.test_dataset,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            # collate_fn=lambda x: x[0] if len(x) == 1 else x,
         )
         idx_to_class = dict((v, k) for k, v in self.train_dataset.class_to_idx.items())
         self.classnames = [
             idx_to_class[i].replace("_", " ") for i in range(len(idx_to_class))
         ]
+        self.num_classes = len(self.classnames)
         self.domain = domain
+        self.slice_2d = slice_2d
+
+    def get_model(self):
+        """Return a Medical3DSegmenter with semantic guidance for MMWHS dataset."""
+        from src.semantic_segmentation import (
+            Medical3DSegmenter,
+            MMWHS_CLASS_DESCRIPTIONS,
+        )
+
+        class_descriptions = MMWHS_CLASS_DESCRIPTIONS[self.domain.upper()]
+        num_classes = len(class_descriptions)
+
+        model = Medical3DSegmenter(
+            encoder_type="swin_unetr",
+            num_classes=num_classes,
+            class_descriptions=class_descriptions,
+            pretrained=True,
+        )
+        model.dataset = self
+        return model
 
     def visualize_3d(self, sample):
         self._visualize_3d(

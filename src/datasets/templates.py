@@ -200,8 +200,25 @@ svhn_template = [
     lambda c: f'a photo of the number: "{c}".',
 ]
 
+# Medical imaging templates
+chaos_template = [
+    lambda c: f"a medical scan showing {c}.",
+    lambda c: f"a CT/MRI image of {c}.",
+    lambda c: f"medical imaging of {c}.",
+    lambda c: f"a scan of {c}.",
+]
+
+mmwhs_template = [
+    lambda c: f"a cardiac image showing {c}.",
+    lambda c: f"a medical scan of {c}.",
+    lambda c: f"cardiac imaging of {c}.",
+    lambda c: f"a heart scan showing {c}.",
+]
+
 dataset_to_template = {
     "Cars": cars_template,
+    "CHAOS": chaos_template,
+    "MMWHS": mmwhs_template,
     "CIFAR10": cifar10_template,
     "CIFAR100": cifar100_template,
     "DTD": dtd_template,
