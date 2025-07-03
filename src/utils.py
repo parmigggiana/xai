@@ -6,6 +6,8 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+import psutil
+
 import numpy as np
 import torch
 import torch.nn
@@ -136,3 +138,19 @@ def download_and_extract_dataset(dataset: str, base_path: str = "data/"):
             print(f"Extracting {zip_path} to {extract_dir}...")
             with zipfile.ZipFile(zip_path, "r") as zip_ref:
                 zip_ref.extractall(extract_dir)
+
+
+def print_memory_usage(stage=""):
+    """Print current memory usage."""
+    process = psutil.Process()
+    memory_info = process.memory_info()
+    memory_mb = memory_info.rss / 1024 / 1024
+
+    if torch.cuda.is_available():
+        gpu_memory = torch.cuda.memory_allocated() / 1024 / 1024
+        gpu_cached = torch.cuda.memory_reserved() / 1024 / 1024
+        print(
+            f"{stage} - RAM: {memory_mb:.1f}MB, GPU: {gpu_memory:.1f}MB (cached: {gpu_cached:.1f}MB)"
+        )
+    else:
+        print(f"{stage} - RAM: {memory_mb:.1f}MB")

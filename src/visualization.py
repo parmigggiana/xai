@@ -23,7 +23,7 @@ def _get_organ_legend(seg_slice, dataset_name):
     legend = {}
     set1 = cm.get_cmap("Set1", 8)  # Set1 is qualitative, 8 distinct colors
 
-    if dataset_name == "CHAOS_MRI":
+    if dataset_name in ["CHAOS_MRI", "CHAOS_MR"]:
         organ_list = [
             ("Liver", (55, 70, 63), 0),
             ("Right kidney", (110, 135, 126), 1),
@@ -109,7 +109,7 @@ def visualize_sample_slice(
     overlay[mask] = seg_slice[mask]
     masked_overlay = np.ma.masked_where(overlay == 0, overlay)
 
-    legend = _get_organ_legend(seg_slice, seg_slice.max(), dataset_name)
+    legend = _get_organ_legend(seg_slice, dataset_name)
     legend_colors = ListedColormap([legend[label] for label in legend])
     legend_labels = list(legend.keys())
     ax2.imshow(masked_overlay, cmap=legend_colors, alpha=0.4)

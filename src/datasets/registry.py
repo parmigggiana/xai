@@ -16,6 +16,7 @@ from src.datasets.mmwhs import MMWHS
 registry = {
     name: obj
     for name, obj in inspect.getmembers(sys.modules[__name__], inspect.isclass)
+    if issubclass(obj, BaseDataset) and obj is not BaseDataset
 }
 
 

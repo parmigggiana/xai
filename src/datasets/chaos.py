@@ -111,7 +111,6 @@ class PyTorchCHAOS(VisionDataset):
             if self.liver_only and self.domain == "MR":
                 # Filter out non-liver labels
                 seg = np.where((seg >= 55) & (seg <= 70), seg, 0)
-
             # print(img.shape)
         else:
             patient_id = self.samples[idx]
@@ -140,6 +139,13 @@ class PyTorchCHAOS(VisionDataset):
                 seg = np.stack(seg_slices, axis=-1)
             else:
                 seg = None
+            # img and seg are (W, H, D)
+            # Ensure (C, D, H, W)
+            img = img.transpose(2, 0, 1)  # (W, H, D) -> (D, H, W)
+            img = img[np.newaxis, ...]  # Add channel dimension
+            if seg is not None:
+                seg = seg.transpose(2, 0, 1)
+                seg = seg[np.newaxis, ...]
 
         sample = {
             "image": torch.from_numpy(img),
