@@ -1,6 +1,6 @@
 torch>=1.12.1
 torchvision
-monai>=1.1.0[einops,nibabel]
+monai[einops,nibabel]>=1.1.0
 numpy
 pydicom
 PILlow
