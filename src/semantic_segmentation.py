@@ -352,7 +352,7 @@ class Medical3DSegmenter(nn.Module):
         x = x.contiguous()
 
         x, original_depth = self._pad_input_for_swin_unetr(x)
-
+        print(f"Input shape after padding: {x.shape}")
         if self.use_semantic_head:
             # Extract features for semantic guidance
             if self.encoder_type == "swin_unetr":

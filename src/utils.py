@@ -107,6 +107,7 @@ class LabelSmoothing(torch.nn.Module):
 def download_and_extract_dataset(dataset: str, base_path: str = "data/"):
     index_url = f"https://xai.balzov.com/{dataset}/"
     base_path = Path(base_path) / dataset
+    Path(base_path).mkdir(parents=True, exist_ok=True)
     with urllib.request.urlopen(index_url) as response:
         html = response.read().decode("utf-8")
         zip_files = re.findall(r'href="([^"]+\.zip)"', html)
