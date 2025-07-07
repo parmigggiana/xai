@@ -197,3 +197,6 @@ cython_debug/
 
 data
 .direnv
+
+*.pt
+*.pth

@@ -7,10 +7,15 @@ This combines the best of both worlds:
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from monai.networks.nets import SwinUNETR, ResNet
-from typing import Dict, List
+from typing import Dict, List, OrderedDict, Tuple
+import os
 
-from src.utils import print_memory_usage
+from monai.apps import download_url
+
+import numpy as np
+from tqdm import tqdm
 
 try:
     from transformers import AutoTokenizer, AutoModel
@@ -66,6 +71,24 @@ class SemanticGuidedSegmentationHead(nn.Module):
             64, num_classes, kernel_size=1
         )  # Changed from 128 to 64
 
+        # Add upsampling decoder to restore original spatial dimensions
+        self.upsampling_decoder = nn.Sequential(
+            # Upsample by factor of 2 in each dimension
+            nn.ConvTranspose3d(num_classes, 64, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm3d(64),
+            nn.ReLU(inplace=True),
+            # Upsample by factor of 2 again
+            nn.ConvTranspose3d(64, 32, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm3d(32),
+            nn.ReLU(inplace=True),
+            # Upsample by factor of 2 again
+            nn.ConvTranspose3d(32, 16, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm3d(16),
+            nn.ReLU(inplace=True),
+            # Final layer to get correct number of classes
+            nn.Conv3d(16, num_classes, kernel_size=3, padding=1),
+        )
+
     def _compute_class_embeddings(self, class_descriptions: List[str]) -> torch.Tensor:
         """Compute text embeddings for each class description."""
         embeddings = []
@@ -96,98 +119,78 @@ class SemanticGuidedSegmentationHead(nn.Module):
         Returns:
             Dict containing logits and semantic alignment scores
         """
-        print(f"🔍 SemanticHead: Input features shape: {features.shape}")
-
         # Apply conv layers
         x = self.conv_layers(features)  # [B, 64, D, H, W] - reduced channels
-        print(f"🔍 SemanticHead: After conv layers shape: {x.shape}")
 
         # Compute semantic alignment with chunked processing to save memory
         B, C, D, H, W = x.shape
-        print(f"🔍 SemanticHead: B={B}, C={C}, D={D}, H={H}, W={W}")
 
         # Process in smaller chunks to reduce memory usage
         chunk_size = min(D * H * W // 4, 1024)  # Process in chunks of max 1024 pixels
-        print(f"🔍 SemanticHead: Chunk size: {chunk_size}")
         semantic_scores_list = []
 
         # Get class embeddings once
         class_embeddings = self.class_embeddings.to(x.device)  # [num_classes, text_dim]
-        print(f"🔍 SemanticHead: Class embeddings shape: {class_embeddings.shape}")
 
         # Reshape for processing
         x_reshaped = x.permute(0, 2, 3, 4, 1).reshape(B, -1, C)  # [B, D*H*W, 64]
-        print(f"🔍 SemanticHead: Reshaped x shape: {x_reshaped.shape}")
 
         # Process each batch separately to save memory
-        print("🔍 SemanticHead: Starting batch processing...")
         for b in range(B):
-            print(f"🔍 SemanticHead: Processing batch {b}/{B}")
             batch_scores = []
             x_batch = x_reshaped[b]  # [D*H*W, 64]
-            print(f"🔍 SemanticHead: Batch {b} shape: {x_batch.shape}")
 
             # Process in chunks
-            print(
-                f"🔍 SemanticHead: Processing {x_batch.shape[0]} pixels in chunks of {chunk_size}"
-            )
             for i in range(0, x_batch.shape[0], chunk_size):
                 chunk = x_batch[i : i + chunk_size]  # [chunk_size, 64]
-                print(
-                    f"🔍 SemanticHead: Chunk {i//chunk_size + 1}, shape: {chunk.shape}"
-                )
 
                 semantic_features = self.semantic_projection(
                     chunk
                 )  # [chunk_size, text_dim]
-                print(
-                    f"🔍 SemanticHead: Semantic features shape: {semantic_features.shape}"
-                )
 
                 # Compute similarity with class embeddings
                 chunk_scores = torch.mm(
                     semantic_features, class_embeddings.t()
                 )  # [chunk_size, num_classes]
-                print(f"🔍 SemanticHead: Chunk scores shape: {chunk_scores.shape}")
                 batch_scores.append(chunk_scores)
 
             # Concatenate chunks back together
             batch_scores = torch.cat(batch_scores, dim=0)  # [D*H*W, num_classes]
-            print(
-                f"🔍 SemanticHead: Batch {b} final scores shape: {batch_scores.shape}"
-            )
             semantic_scores_list.append(batch_scores)
+
         # Stack batches and reshape
-        print(f"🔍 SemanticHead: Stacking {len(semantic_scores_list)} batches...")
         semantic_scores = torch.stack(
             semantic_scores_list, dim=0
         )  # [B, D*H*W, num_classes]
-        print(
-            f"🔍 SemanticHead: Stacked semantic scores shape: {semantic_scores.shape}"
-        )
 
         semantic_scores = semantic_scores.reshape(B, D, H, W, self.num_classes)
-        print(f"🔍 SemanticHead: Reshaped semantic scores: {semantic_scores.shape}")
 
         semantic_scores = semantic_scores.permute(
             0, 4, 1, 2, 3
         )  # [B, num_classes, D, H, W]
-        print(f"🔍 SemanticHead: Final semantic scores shape: {semantic_scores.shape}")
 
         # Main classification
         logits = self.classifier(x)  # [B, num_classes, D, H, W]
-        print(f"🔍 SemanticHead: Logits shape: {logits.shape}")
 
-        print("🔍 SemanticHead: Creating output dictionary...")
-        result = {
-            "logits": logits,
-            "semantic_scores": semantic_scores,
-            "combined": logits + 0.1 * semantic_scores,  # Weighted combination
+        # Apply upsampling to restore original spatial dimensions
+        upsampled_logits = self.upsampling_decoder(logits)
+
+        # Upsample semantic scores to match logits dimensions
+        upsampled_semantic_scores = nn.functional.interpolate(
+            semantic_scores,
+            size=upsampled_logits.shape[2:],  # Target spatial dimensions [D, H, W]
+            mode="trilinear",
+            align_corners=False,
+        )
+
+        # Combine semantic and convolutional predictions
+        combined = 0.7 * upsampled_semantic_scores + 0.3 * upsampled_logits
+
+        return {
+            "semantic": upsampled_semantic_scores,
+            "logits": upsampled_logits,
+            "combined": combined,
         }
-        print(f"🔍 SemanticHead: Combined output shape: {result['combined'].shape}")
-        print("✅ SemanticHead: Forward pass completed successfully!")
-
-        return result
 
 
 class Medical3DSegmenter(nn.Module):
@@ -222,7 +225,12 @@ class Medical3DSegmenter(nn.Module):
                 attn_drop_rate=0.0,
                 dropout_path_rate=0.0,
             )
-            feature_dim = 48  # SwinUNETR feature dimension
+            feature_dim = 768  # Adjusted: feature_dim = feature_size * 16
+
+            # Load pretrained SwinViT weights if available
+            if pretrained:
+                self._load_swinvit_weights()
+
         elif encoder_type == "resnet":
             # Create ResNet but we'll modify it to preserve spatial dimensions
             self.encoder = ResNet(
@@ -230,7 +238,7 @@ class Medical3DSegmenter(nn.Module):
                 n_input_channels=1,
                 num_classes=num_classes,
                 block="basic",
-                layers=[3, 4, 6, 3],
+                layers=[2, 2, 2, 2],  # ResNet-18 style (smaller)
                 block_inplanes=[64, 128, 256, 512],
             )
             feature_dim = 512
@@ -240,26 +248,92 @@ class Medical3DSegmenter(nn.Module):
         # Semantic-guided head (if descriptions provided)
         if class_descriptions:
             self.use_semantic_head = True
-            # For SwinUNETR, we need to use a different approach to extract features
-            if encoder_type == "swin_unetr":
-                # Keep the full SwinUNETR model, we'll extract features in forward
-                # SwinUNETR output features are typically from the decoder before final layer
-                # We'll use the encoder outputs directly
-                self.semantic_head = SemanticGuidedSegmentationHead(
-                    feature_dim=384,  # Reduced from 768 for memory efficiency
-                    num_classes=num_classes,
-                    class_descriptions=class_descriptions,
-                )
-            else:
-                # For ResNet, we need to extract features before global pooling
-                # We'll create a custom forward method that preserves spatial dimensions
-                self.semantic_head = SemanticGuidedSegmentationHead(
-                    feature_dim=feature_dim,
-                    num_classes=num_classes,
-                    class_descriptions=class_descriptions,
-                )
+            self.semantic_head = SemanticGuidedSegmentationHead(
+                feature_dim=feature_dim,
+                num_classes=num_classes,
+                class_descriptions=class_descriptions,
+            )
         else:
             self.use_semantic_head = False
+
+    def _load_swinvit_weights(self):
+        """Load pretrained SwinViT weights from data/model_swinvit.pt"""
+        try:
+            resource = "https://github.com/Project-MONAI/MONAI-extra-test-data/releases/download/0.8.1/ssl_pretrained_weights.pth"
+            dst = "./data/ssl_pretrained_weights.pth"
+            download_url(resource, dst)
+            pretrained_path = os.path.normpath(dst)
+            ssl_dict = torch.load(pretrained_path, weights_only=True)
+            ssl_weights = ssl_dict["model"]
+
+            # Generate new state dict so it can be loaded to MONAI SwinUNETR Model
+            monai_loadable_state_dict = OrderedDict()
+            model_prior_dict = self.encoder.state_dict()
+            model_update_dict = model_prior_dict
+
+            del ssl_weights["encoder.mask_token"]
+            del ssl_weights["encoder.norm.weight"]
+            del ssl_weights["encoder.norm.bias"]
+            del ssl_weights["out.conv.conv.weight"]
+            del ssl_weights["out.conv.conv.bias"]
+
+            for key, value in ssl_weights.items():
+                if key[:8] == "encoder.":
+                    if key[8:19] == "patch_embed":
+                        new_key = "swinViT." + key[8:]
+                    else:
+                        new_key = "swinViT." + key[8:18] + key[20:]
+                    monai_loadable_state_dict[new_key] = value
+                else:
+                    monai_loadable_state_dict[key] = value
+
+            model_update_dict.update(monai_loadable_state_dict)
+            self.encoder.load_state_dict(model_update_dict, strict=True)
+            model_final_loaded_dict = self.encoder.state_dict()
+
+            # Safeguard test to ensure that weights got loaded successfully
+            layer_counter = 0
+            for k, _v in model_final_loaded_dict.items():
+                if k in model_prior_dict:
+                    layer_counter = layer_counter + 1
+
+                    old_wts = model_prior_dict[k]
+                    new_wts = model_final_loaded_dict[k]
+
+                    old_wts = old_wts.to("cpu").numpy()
+                    new_wts = new_wts.to("cpu").numpy()
+                    diff = np.mean(np.abs(old_wts, new_wts))
+                    print("Layer {}, the update difference is: {}".format(k, diff))
+                    if diff == 0.0:
+                        print("Warning: No difference found for layer {}".format(k))
+            print(
+                "Total updated layers {} / {}".format(
+                    layer_counter, len(model_prior_dict)
+                )
+            )
+            print("Pretrained Weights Succesfully Loaded !")
+
+        except Exception as e:
+            print(f"Error loading SwinViT weights: {e}")
+
+    def _pad_input_for_swin_unetr(self, x: torch.Tensor) -> Tuple[torch.Tensor, int]:
+        """Pads the input tensor's depth to be divisible by 32 for SwinUNETR."""
+        original_depth = x.shape[2]
+        if self.encoder_type == "swin_unetr":
+            depth = x.shape[2]
+            if depth % 32 != 0:
+                pad_depth = 32 - (depth % 32)
+                padding = (0, 0, 0, 0, 0, pad_depth)
+                x = F.pad(x, padding, "constant", 0)
+        return x, original_depth
+
+    def _crop_output_to_original_size(
+        self, result: torch.Tensor, original_depth: int
+    ) -> torch.Tensor:
+        """Crops the output tensor back to the original depth if it was padded."""
+        if self.encoder_type == "swin_unetr" and result.shape[2] != original_depth:
+            result = result[:, :, :original_depth, :, :]
+        return result
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Handle case where input might be a list (from some operations)
@@ -277,20 +351,25 @@ class Medical3DSegmenter(nn.Module):
         # Ensure tensor is contiguous
         x = x.contiguous()
 
+        x, original_depth = self._pad_input_for_swin_unetr(x)
+
         if self.use_semantic_head:
             # Extract features for semantic guidance
             if self.encoder_type == "swin_unetr":
-                # For SwinUNETR, use the encoder part
-                features = self.encoder(x)
+                features = self.encoder.swinViT(x)[-1]
+
             elif self.encoder_type == "resnet":
-                # For ResNet, extract features before global pooling
                 features = self._extract_resnet_features(x)
 
             outputs = self.semantic_head(features)
-            return outputs["combined"]  # Use semantic-guided predictions
+            result = outputs["combined"]  # Use semantic-guided predictions
         else:
             # Direct encoder output (for models without semantic head)
-            return self.encoder(x)
+            result = self.encoder(x)
+
+        result = self._crop_output_to_original_size(result, original_depth)
+
+        return result
 
     def _extract_resnet_features(self, x: torch.Tensor) -> torch.Tensor:
         """Extract features from ResNet before global pooling to preserve spatial dimensions."""
@@ -320,15 +399,15 @@ class Medical3DSegmenter(nn.Module):
     def freeze(self):
         for param in self.encoder.parameters():
             param.requires_grad = False
-        for param in self.semantic_head.parameters():
-            param.requires_grad = False
+        if self.use_semantic_head:
+            for param in self.semantic_head.parameters():
+                param.requires_grad = False
 
     def finetune(self, epochs: int = 5):
         """Finetune the model on the dataset."""
         # This would implement the training loop
         # For now, just save the current state as "finetuned"
-
-        print(f"Finetuning completed for {epochs} epochs")
+        pass
 
     def load_task_vector(self, task_vector):
         """Load a task vector into the model."""
@@ -336,7 +415,6 @@ class Medical3DSegmenter(nn.Module):
             for name, param in self.named_parameters():
                 if name in task_vector.vector:
                     param.data += task_vector.vector[name]
-        print("Task vector loaded successfully")
 
     def evaluate(self):
         """Evaluate the model and return metrics on both train and test loaders."""
@@ -345,10 +423,10 @@ class Medical3DSegmenter(nn.Module):
         device = next(self.parameters()).device
         self.eval()
 
-        # dice_metric = DiceMetric(include_background=False, reduction="mean")
-        # hausdorff_metric = HausdorffDistanceMetric(
-        #     include_background=False, reduction="mean"
-        # )
+        dice_metric = DiceMetric(include_background=False, reduction="mean")
+        hausdorff_metric = HausdorffDistanceMetric(
+            include_background=False, reduction="mean"
+        )
 
         results = {}
 
@@ -358,41 +436,38 @@ class Medical3DSegmenter(nn.Module):
             if loader is None:
                 continue
 
-            # dice_metric.reset()
-            # hausdorff_metric.reset()
+            dice_metric.reset()
+            hausdorff_metric.reset()
             has_labels = False
 
             with torch.no_grad():
-                for batch in loader:
-                    print_memory_usage(f"Batch size: {batch['image'].shape}")
+                for batch in tqdm(loader):
                     images = batch["image"].to(device)
                     labels = batch.get("label", None)
                     if labels is None:
                         continue
                     labels = labels.to(device)
-                    # has_labels = True
+                    has_labels = True
 
                     outputs = self(images)
-                    preds = torch.argmax(outputs, dim=1)
+                    preds = torch.argmax(
+                        outputs, dim=1, keepdim=True
+                    )  # [B, 1, D, H, W]
 
                     # Compute metrics for this batch
-                    # dice_metric(y_pred=preds, y=labels)
-                    # hausdorff_metric(y_pred=preds, y=labels)
+                    dice_metric(y_pred=preds, y=labels)
+                    hausdorff_metric(y_pred=preds, y=labels)
 
-                    # Compute Mean Class Accuracy (mAcc)
-
-                    # Compute Mean Intersection over Union (mIoU)
-
-            # if has_labels:
-            # try:
-            # dice_score = dice_metric.aggregate().item()
-            # hausdorff_dist = hausdorff_metric.aggregate().item()
-            # results[split] = {"dice": dice_score, "hausdorff": hausdorff_dist}
-            # except (ValueError, RuntimeError):
-            # Handle case where no valid predictions were made
-            # results[split] = {"dice": None, "hausdorff": None}
-            # else:
-            #     results[split] = {"dice": None, "hausdorff": None}
+            if has_labels:
+                try:
+                    dice_score = dice_metric.aggregate().item()
+                    hausdorff_dist = hausdorff_metric.aggregate().item()
+                    results[split] = {"dice": dice_score, "hausdorff": hausdorff_dist}
+                except (ValueError, RuntimeError):
+                    # Handle case where no valid predictions were made
+                    results[split] = {"dice": None, "hausdorff": None}
+            else:
+                results[split] = {"dice": None, "hausdorff": None}
 
         return results
 
