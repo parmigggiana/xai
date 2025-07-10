@@ -61,6 +61,7 @@
             export LD_LIBRARY_PATH=${pkgs.libGL}/lib:$LD_LIBRARY_PATH;
             export LD_LIBRARY_PATH=${pkgs.libglvnd}/lib:$LD_LIBRARY_PATH;
             export LD_LIBRARY_PATH=${pkgs.qt5.qtbase}/lib:$LD_LIBRARY_PATH;
+            export LD_LIBRARY_PATH=${pkgs.stdenv.cc.cc.lib}/lib:$LD_LIBRARY_PATH;
             export QT_QPA_PLATFORM_PLUGIN_PATH=${pkgs.qt5.qtbase}/lib/qt-${pkgs.qt5.qtbase.version}/plugins/platforms;
             export QT_PLUGIN_PATH=${pkgs.qt5.qtbase}/lib/qt/plugins;
             export XDG_DATA_DIRS=${pkgs.adwaita-icon-theme}/share:$XDG_DATA_DIRS;

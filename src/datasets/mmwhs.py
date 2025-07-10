@@ -140,6 +140,11 @@ class PyTorchMMWHS(VisionDataset):
                 ),
             }
         else:
+            img_data = img_data.transpose(2, 0, 1)  # (W, H, D) -> (D, H, W)
+            img_data = img_data[np.newaxis, ...]  # Add channel dimension
+            if label_data is not None:
+                label_data = label_data.transpose(2, 0, 1)
+                label_data = label_data[np.newaxis, ...]
             data = {
                 "image": torch.from_numpy(img_data),
                 "label": (

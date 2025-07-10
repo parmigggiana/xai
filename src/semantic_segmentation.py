@@ -8,7 +8,8 @@ This combines the best of both worlds:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from monai.networks.nets import SwinUNETR, ResNet
+from monai.networks.nets.resnet import resnet50
+from monai.networks.nets import SwinUNETR
 from typing import Dict, List, OrderedDict, Tuple
 import os
 
@@ -52,42 +53,31 @@ class SemanticGuidedSegmentationHead(nn.Module):
         # Get text embeddings for each class
         self.class_embeddings = self._compute_class_embeddings(class_descriptions)
 
-        # 3D segmentation layers - reduced channels for memory efficiency
+        # 3D segmentation layers with increased middle layer sizes (deeper and wider network)
         self.conv_layers = nn.Sequential(
-            nn.Conv3d(feature_dim, 128, kernel_size=3, padding=1),  # Reduced from 256
-            nn.BatchNorm3d(128),
+            nn.Conv3d(feature_dim, 1024, kernel_size=3, padding=1),
+            nn.BatchNorm3d(1024),
             nn.ReLU(inplace=True),
-            nn.Conv3d(128, 64, kernel_size=3, padding=1),  # Reduced from 128
-            nn.BatchNorm3d(64),
+            nn.Conv3d(1024, 1024, kernel_size=3, padding=1),
+            nn.BatchNorm3d(1024),
             nn.ReLU(inplace=True),
         )
 
-        # Semantic alignment layer - updated for reduced channels
+        # Semantic alignment layer - updated for increased channels
         text_dim = self.class_embeddings.shape[1]
-        self.semantic_projection = nn.Linear(64, text_dim)  # Changed from 128 to 64
+        self.semantic_projection = nn.Linear(1024, text_dim)
 
-        # Final classification layer - updated for reduced channels
-        self.classifier = nn.Conv3d(
-            64, num_classes, kernel_size=1
-        )  # Changed from 128 to 64
+        # Final classification layer - updated for increased channels
+        self.classifier = nn.Conv3d(1024, num_classes, kernel_size=1)
 
-        # Add upsampling decoder to restore original spatial dimensions
-        self.upsampling_decoder = nn.Sequential(
-            # Upsample by factor of 2 in each dimension
-            nn.ConvTranspose3d(num_classes, 64, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm3d(64),
-            nn.ReLU(inplace=True),
-            # Upsample by factor of 2 again
-            nn.ConvTranspose3d(64, 32, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm3d(32),
-            nn.ReLU(inplace=True),
-            # Upsample by factor of 2 again
-            nn.ConvTranspose3d(32, 16, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm3d(16),
-            nn.ReLU(inplace=True),
-            # Final layer to get correct number of classes
-            nn.Conv3d(16, num_classes, kernel_size=3, padding=1),
-        )
+        # Reduced upsampling decoder (only one upsampling step)
+        # self.upsampling_decoder = nn.Sequential(
+        #     nn.ConvTranspose3d(num_classes, 32, kernel_size=4, stride=2, padding=1),
+        #     nn.BatchNorm3d(32),
+        #     nn.ReLU(inplace=True),
+        #     nn.Conv3d(32, num_classes, kernel_size=3, padding=1),
+        # )
+        self.upsampling_decoder = nn.Identity()
 
     def _compute_class_embeddings(self, class_descriptions: List[str]) -> torch.Tensor:
         """Compute text embeddings for each class description."""
@@ -108,6 +98,92 @@ class SemanticGuidedSegmentationHead(nn.Module):
                 embeddings.append(embedding)
 
         return torch.stack(embeddings)
+
+    def train_classification_head(
+        self,
+        classnames: List[str],
+        templates: List[str],
+        device: torch.device = None,
+        logit_scale: float = 1.0,
+    ):
+        """
+        Build classification head weights using text embeddings similar to CLIP zero-shot classification.
+
+        Args:
+            classnames: List of class names to build embeddings for
+            templates: List of template strings with {} placeholder for class names
+            device: Device to run computation on
+            logit_scale: Scale factor for logits (similar to CLIP's logit_scale)
+
+        Returns:
+            Updated class_embeddings tensor that can be used for classification
+        """
+        if device is None:
+            device = next(self.text_encoder.parameters()).device
+
+        self.text_encoder.eval()
+
+        print("Building classification head for semantic segmentation.")
+        with torch.no_grad():
+            zeroshot_weights = []
+
+            for classname in tqdm(classnames):
+                texts = []
+                # Apply each template to the classname
+                for template in templates:
+                    if "{}" in template:
+                        texts.append(template.format(classname))
+                    else:
+                        # If no placeholder, just append template + classname
+                        texts.append(f"{template} {classname}")
+
+                # Tokenize all text variations for this class
+                text_embeddings = []
+                for text in texts:
+                    inputs = self.tokenizer(
+                        text,
+                        return_tensors="pt",
+                        padding=True,
+                        truncation=True,
+                        max_length=512,
+                    )
+                    inputs = {k: v.to(device) for k, v in inputs.items()}
+
+                    outputs = self.text_encoder(**inputs)
+                    # Use CLS token embedding
+                    embedding = outputs.last_hidden_state[:, 0, :].squeeze()
+
+                    # Normalize embedding
+                    embedding = embedding / embedding.norm(dim=-1, keepdim=True)
+                    text_embeddings.append(embedding)
+
+                # Average embeddings across templates for this class
+                class_embedding = torch.stack(text_embeddings).mean(dim=0, keepdim=True)
+                # Normalize again after averaging
+                class_embedding = class_embedding / class_embedding.norm()
+
+                zeroshot_weights.append(class_embedding)
+
+            # Stack all class embeddings
+            zeroshot_weights = torch.stack(zeroshot_weights, dim=0).to(
+                device
+            )  # [num_classes, 1, text_dim]
+            zeroshot_weights = zeroshot_weights.squeeze(1)  # [num_classes, text_dim]
+
+            # Apply logit scaling (similar to CLIP)
+            if (
+                abs(logit_scale - 1.0) > 1e-8
+            ):  # Use tolerance for floating point comparison
+                zeroshot_weights = zeroshot_weights * logit_scale
+
+            # Transpose to match expected format [text_dim, num_classes] for matrix multiplication
+            zeroshot_weights = zeroshot_weights.t()  # [text_dim, num_classes]
+
+        # Update the class embeddings
+        self.class_embeddings = zeroshot_weights.t()  # Store as [num_classes, text_dim]
+
+        print(f"Classification head built with shape: {self.class_embeddings.shape}")
+        return self.class_embeddings
 
     def forward(self, features: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
@@ -233,15 +309,14 @@ class Medical3DSegmenter(nn.Module):
 
         elif encoder_type == "resnet":
             # Create ResNet but we'll modify it to preserve spatial dimensions
-            self.encoder = ResNet(
-                spatial_dims=3,
+            self.encoder = resnet50(
+                pretrained=pretrained,
                 n_input_channels=1,
-                num_classes=num_classes,
-                block="basic",
-                layers=[2, 2, 2, 2],  # ResNet-18 style (smaller)
-                block_inplanes=[64, 128, 256, 512],
+                feed_forward=False,
+                shortcut_type="B",
+                bias_downsample=False,
             )
-            feature_dim = 512
+            feature_dim = 2048
         else:
             raise ValueError(f"Unknown encoder type: {encoder_type}")
 
@@ -278,7 +353,7 @@ class Medical3DSegmenter(nn.Module):
             del ssl_weights["out.conv.conv.bias"]
 
             for key, value in ssl_weights.items():
-                if key[:8] == "encoder.":
+                if key.startswith("encoder."):
                     if key[8:19] == "patch_embed":
                         new_key = "swinViT." + key[8:]
                     else:
@@ -304,7 +379,7 @@ class Medical3DSegmenter(nn.Module):
                     new_wts = new_wts.to("cpu").numpy()
                     diff = np.mean(np.abs(old_wts, new_wts))
                     print("Layer {}, the update difference is: {}".format(k, diff))
-                    if diff == 0.0:
+                    if abs(diff) < 1e-8:  # Use tolerance for floating point comparison
                         print("Warning: No difference found for layer {}".format(k))
             print(
                 "Total updated layers {} / {}".format(
@@ -315,6 +390,57 @@ class Medical3DSegmenter(nn.Module):
 
         except Exception as e:
             print(f"Error loading SwinViT weights: {e}")
+
+    def _preprocess_input(
+        self, x: torch.Tensor
+    ) -> Tuple[torch.Tensor, Tuple[int, int, int]]:
+        """
+        Preprocess input by resampling to 256x256 while keeping depth the same.
+
+        Args:
+            x: Input tensor [B, C, D, H, W]
+
+        Returns:
+            Tuple of (preprocessed_tensor, original_spatial_size)
+        """
+        original_size = x.shape[2:]  # (D, H, W)
+
+        # Only resample H and W dimensions to 256x256, keep D unchanged
+        target_size = (original_size[0], 256, 256)  # (D, 256, 256)
+
+        if original_size[1:] != (
+            256,
+            256,
+        ):  # Only resample if H,W are not already 256x256
+            print(f"Resampling from {original_size} to {target_size}")
+            x = F.interpolate(
+                x, size=target_size, mode="trilinear", align_corners=False
+            )
+
+        return x, original_size
+
+    def _postprocess_output(
+        self, result: torch.Tensor, original_size: Tuple[int, int, int]
+    ) -> torch.Tensor:
+        """
+        Postprocess output by resampling back to original spatial dimensions.
+
+        Args:
+            result: Model output tensor [B, C, D, H, W]
+            original_size: Original spatial dimensions (D, H, W)
+
+        Returns:
+            Tensor resampled to original spatial dimensions
+        """
+        current_size = result.shape[2:]  # (D, H, W)
+
+        if current_size != original_size:
+            print(f"Resampling output from {current_size} to {original_size}")
+            result = F.interpolate(
+                result, size=original_size, mode="trilinear", align_corners=False
+            )
+
+        return result
 
     def _pad_input_for_swin_unetr(self, x: torch.Tensor) -> Tuple[torch.Tensor, int]:
         """Pads the input tensor's depth to be divisible by 32 for SwinUNETR."""
@@ -351,8 +477,10 @@ class Medical3DSegmenter(nn.Module):
         # Ensure tensor is contiguous
         x = x.contiguous()
 
+        # Preprocess input: resample to 256x256
+        # x, original_size = self._preprocess_input(x)
         x, original_depth = self._pad_input_for_swin_unetr(x)
-        print(f"Input shape after padding: {x.shape}")
+
         if self.use_semantic_head:
             # Extract features for semantic guidance
             if self.encoder_type == "swin_unetr":
@@ -368,6 +496,9 @@ class Medical3DSegmenter(nn.Module):
             result = self.encoder(x)
 
         result = self._crop_output_to_original_size(result, original_depth)
+
+        # Postprocess output: resample to original size
+        # result = self._postprocess_output(result, original_size)
 
         return result
 
@@ -403,11 +534,181 @@ class Medical3DSegmenter(nn.Module):
             for param in self.semantic_head.parameters():
                 param.requires_grad = False
 
-    def finetune(self, epochs: int = 5):
-        """Finetune the model on the dataset."""
-        # This would implement the training loop
-        # For now, just save the current state as "finetuned"
-        pass
+    def finetune(
+        self,
+        epochs: int = 5,
+        learning_rate: float = 1e-4,
+        weight_decay: float = 1e-5,
+        save_best: bool = True,
+    ):
+        """
+        Finetune the model on the dataset.
+
+        Args:
+            epochs: Number of training epochs
+            learning_rate: Learning rate for optimizer
+            weight_decay: Weight decay for regularization
+            save_best: Whether to save the best model based on validation Dice score
+
+        Returns:
+            Dictionary with training history (losses, metrics)
+        """
+        if self.dataset is None:
+            raise ValueError("Dataset must be provided to finetune the model")
+
+        # Import training utilities
+        import torch.optim as optim
+        from monai.losses import DiceCELoss
+        from monai.metrics import DiceMetric
+
+        device = next(self.parameters()).device
+
+        # Setup loss function (Dice + Cross Entropy for medical segmentation)
+        loss_function = DiceCELoss(
+            include_background=False,
+            to_onehot_y=True,
+            softmax=True,
+            squared_pred=True,
+            smooth_nr=0.0,
+            smooth_dr=1e-6,
+        )
+
+        # Setup optimizer
+        optimizer = optim.AdamW(
+            self.parameters(), lr=learning_rate, weight_decay=weight_decay
+        )
+
+        # Setup metrics
+        dice_metric = DiceMetric(include_background=False, reduction="mean")
+
+        # Training history
+        history = {
+            "train_loss": [],
+            "train_dice": [],
+            "val_loss": [],
+            "val_dice": [],
+        }
+
+        best_val_dice = 0.0
+        best_model_state = None
+
+        print(f"Starting finetuning for {epochs} epochs...")
+        print(f"Learning rate: {learning_rate}, Weight decay: {weight_decay}")
+        print(f"Device: {device}")
+
+        for epoch in range(epochs):
+            print(f"\nEpoch {epoch + 1}/{epochs}")
+            print("-" * 40)
+
+            # Training phase
+            self.train()
+            train_loss = 0.0
+            train_dice_scores = []
+
+            train_loader = self.dataset.train_loader
+
+            for batch_idx, batch in enumerate(tqdm(train_loader, desc="Training")):
+                images = batch["image"].to(device)
+                labels = batch["label"].to(device)
+
+                # Zero gradients
+                optimizer.zero_grad()
+
+                # Forward pass
+                outputs = self(images)
+
+                # Compute loss
+                loss = loss_function(outputs, labels)
+
+                # Backward pass
+                loss.backward()
+                optimizer.step()
+
+                # Accumulate metrics
+                train_loss += loss.item()
+
+                # Compute Dice score
+                with torch.no_grad():
+                    preds = torch.argmax(outputs, dim=1, keepdim=True)
+                    dice_metric(y_pred=preds, y=labels)
+                    dice_score = dice_metric.aggregate().item()
+                    train_dice_scores.append(dice_score)
+                    dice_metric.reset()
+
+                # Print progress every 10 batches
+                if (batch_idx + 1) % 10 == 0:
+                    avg_loss = train_loss / (batch_idx + 1)
+                    avg_dice = np.mean(train_dice_scores)
+                    print(
+                        f"  Batch {batch_idx + 1}/{len(train_loader)}: "
+                        f"Loss {avg_loss:.4f}, Dice {avg_dice:.4f}"
+                    )
+
+            # Calculate average training metrics
+            avg_train_loss = train_loss / len(train_loader)
+            avg_train_dice = np.mean(train_dice_scores)
+
+            # Validation phase
+            self.eval()
+            val_loss = 0.0
+            val_dice_scores = []
+
+            val_loader = getattr(self.dataset, "val_loader", self.dataset.test_loader)
+
+            with torch.no_grad():
+                for batch in tqdm(val_loader, desc="Validation"):
+                    images = batch["image"].to(device)
+                    labels = batch["label"].to(device)
+
+                    # Forward pass
+                    outputs = self(images)
+
+                    # Compute loss
+                    loss = loss_function(outputs, labels)
+                    val_loss += loss.item()
+
+                    # Compute Dice score
+                    preds = torch.argmax(outputs, dim=1, keepdim=True)
+                    dice_metric(y_pred=preds, y=labels)
+                    dice_score = dice_metric.aggregate().item()
+                    val_dice_scores.append(dice_score)
+                    dice_metric.reset()
+
+            # Calculate average validation metrics
+            avg_val_loss = val_loss / len(val_loader)
+            avg_val_dice = np.mean(val_dice_scores)
+
+            # Save to history
+            history["train_loss"].append(avg_train_loss)
+            history["train_dice"].append(avg_train_dice)
+            history["val_loss"].append(avg_val_loss)
+            history["val_dice"].append(avg_val_dice)
+
+            # Print epoch summary
+            print(f"\nEpoch {epoch + 1} Summary:")
+            print(
+                f"  Train Loss: {avg_train_loss:.4f}, Train Dice: {avg_train_dice:.4f}"
+            )
+            print(f"  Val Loss:   {avg_val_loss:.4f}, Val Dice:   {avg_val_dice:.4f}")
+
+            # Save best model
+            if save_best and avg_val_dice > best_val_dice:
+                best_val_dice = avg_val_dice
+                best_model_state = self.state_dict().copy()
+                print(f"  ✓ New best model saved (Val Dice: {best_val_dice:.4f})")
+
+        # Load best model if requested
+        if save_best and best_model_state is not None:
+            self.load_state_dict(best_model_state)
+            print(f"\n✓ Loaded best model with validation Dice: {best_val_dice:.4f}")
+
+        print(f"\n🎉 Finetuning completed!")
+        print(f"Final metrics:")
+        print(f"  Best Val Dice: {best_val_dice:.4f}")
+        print(f"  Final Train Dice: {history['train_dice'][-1]:.4f}")
+        print(f"  Final Val Dice: {history['val_dice'][-1]:.4f}")
+
+        return history
 
     def load_task_vector(self, task_vector):
         """Load a task vector into the model."""
