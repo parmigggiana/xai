@@ -444,21 +444,25 @@ class Medical3DSegmenter(nn.Module):
 
     def _pad_input_for_swin_unetr(self, x: torch.Tensor) -> Tuple[torch.Tensor, int]:
         """Pads the input tensor's depth to be divisible by 32 for SwinUNETR."""
-        original_depth = x.shape[2]
+        original_shape = (x.shape[2], x.shape[3], x.shape[4])
         if self.encoder_type == "swin_unetr":
-            depth = x.shape[2]
-            if depth % 32 != 0:
-                pad_depth = 32 - (depth % 32)
-                padding = (0, 0, 0, 0, 0, pad_depth)
+            depth, height, width = x.shape[2], x.shape[3], x.shape[4]
+            pad_depth = (32 - depth % 32) if depth % 32 != 0 else 0
+            pad_height = (32 - height % 32) if height % 32 != 0 else 0
+            pad_width = (32 - width % 32) if width % 32 != 0 else 0
+            # F.pad uses (W_left, W_right, H_left, H_right, D_left, D_right)
+            padding = (0, pad_width, 0, pad_height, 0, pad_depth)
+            if pad_depth > 0 or pad_height > 0 or pad_width > 0:
                 x = F.pad(x, padding, "constant", 0)
-        return x, original_depth
+        return x, original_shape
 
     def _crop_output_to_original_size(
-        self, result: torch.Tensor, original_depth: int
+        self, result: torch.Tensor, original_shape: Tuple[int, int, int]
     ) -> torch.Tensor:
-        """Crops the output tensor back to the original depth if it was padded."""
-        if self.encoder_type == "swin_unetr" and result.shape[2] != original_depth:
-            result = result[:, :, :original_depth, :, :]
+        """Crops the output tensor back to the original shape if it was padded."""
+        if self.encoder_type == "swin_unetr":
+            depth, height, width = original_shape
+            result = result[:, :, :depth, :height, :width]
         return result
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -479,7 +483,7 @@ class Medical3DSegmenter(nn.Module):
 
         # Preprocess input: resample to 256x256
         # x, original_size = self._preprocess_input(x)
-        x, original_depth = self._pad_input_for_swin_unetr(x)
+        x, original_shape = self._pad_input_for_swin_unetr(x)
 
         if self.use_semantic_head:
             # Extract features for semantic guidance
@@ -495,7 +499,7 @@ class Medical3DSegmenter(nn.Module):
             # Direct encoder output (for models without semantic head)
             result = self.encoder(x)
 
-        result = self._crop_output_to_original_size(result, original_depth)
+        result = self._crop_output_to_original_size(result, original_shape)
 
         # Postprocess output: resample to original size
         # result = self._postprocess_output(result, original_size)
@@ -539,7 +543,6 @@ class Medical3DSegmenter(nn.Module):
         epochs: int = 5,
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-5,
-        save_best: bool = True,
     ):
         """
         Finetune the model on the dataset.
@@ -589,9 +592,6 @@ class Medical3DSegmenter(nn.Module):
             "val_dice": [],
         }
 
-        best_val_dice = 0.0
-        best_model_state = None
-
         print(f"Starting finetuning for {epochs} epochs...")
         print(f"Learning rate: {learning_rate}, Weight decay: {weight_decay}")
         print(f"Device: {device}")
@@ -618,6 +618,7 @@ class Medical3DSegmenter(nn.Module):
                 outputs = self(images)
 
                 # Compute loss
+                labels = self.dataset.de_encode(labels)
                 loss = loss_function(outputs, labels)
 
                 # Backward pass
@@ -635,76 +636,26 @@ class Medical3DSegmenter(nn.Module):
                     train_dice_scores.append(dice_score)
                     dice_metric.reset()
 
-                # Print progress every 10 batches
-                if (batch_idx + 1) % 10 == 0:
-                    avg_loss = train_loss / (batch_idx + 1)
-                    avg_dice = np.mean(train_dice_scores)
-                    print(
-                        f"  Batch {batch_idx + 1}/{len(train_loader)}: "
-                        f"Loss {avg_loss:.4f}, Dice {avg_dice:.4f}"
-                    )
-
+                # Update tqdm with current loss and dice score
+                tqdm.set_postfix(loss=loss.item(), dice=dice_score)
             # Calculate average training metrics
             avg_train_loss = train_loss / len(train_loader)
             avg_train_dice = np.mean(train_dice_scores)
 
             # Validation phase
             self.eval()
-            val_loss = 0.0
-            val_dice_scores = []
 
-            val_loader = getattr(self.dataset, "val_loader", self.dataset.test_loader)
-
-            with torch.no_grad():
-                for batch in tqdm(val_loader, desc="Validation"):
-                    images = batch["image"].to(device)
-                    labels = batch["label"].to(device)
-
-                    # Forward pass
-                    outputs = self(images)
-
-                    # Compute loss
-                    loss = loss_function(outputs, labels)
-                    val_loss += loss.item()
-
-                    # Compute Dice score
-                    preds = torch.argmax(outputs, dim=1, keepdim=True)
-                    dice_metric(y_pred=preds, y=labels)
-                    dice_score = dice_metric.aggregate().item()
-                    val_dice_scores.append(dice_score)
-                    dice_metric.reset()
-
-            # Calculate average validation metrics
-            avg_val_loss = val_loss / len(val_loader)
-            avg_val_dice = np.mean(val_dice_scores)
-
-            # Save to history
             history["train_loss"].append(avg_train_loss)
             history["train_dice"].append(avg_train_dice)
-            history["val_loss"].append(avg_val_loss)
-            history["val_dice"].append(avg_val_dice)
 
             # Print epoch summary
             print(f"\nEpoch {epoch + 1} Summary:")
             print(
                 f"  Train Loss: {avg_train_loss:.4f}, Train Dice: {avg_train_dice:.4f}"
             )
-            print(f"  Val Loss:   {avg_val_loss:.4f}, Val Dice:   {avg_val_dice:.4f}")
-
-            # Save best model
-            if save_best and avg_val_dice > best_val_dice:
-                best_val_dice = avg_val_dice
-                best_model_state = self.state_dict().copy()
-                print(f"  ✓ New best model saved (Val Dice: {best_val_dice:.4f})")
-
-        # Load best model if requested
-        if save_best and best_model_state is not None:
-            self.load_state_dict(best_model_state)
-            print(f"\n✓ Loaded best model with validation Dice: {best_val_dice:.4f}")
 
         print(f"\n🎉 Finetuning completed!")
         print(f"Final metrics:")
-        print(f"  Best Val Dice: {best_val_dice:.4f}")
         print(f"  Final Train Dice: {history['train_dice'][-1]:.4f}")
         print(f"  Final Val Dice: {history['val_dice'][-1]:.4f}")
 

@@ -205,6 +205,8 @@ class CHAOS(BaseDataset):
             batch_size=batch_size,
             num_workers=num_workers,
         )
+        if self.test_dataset[0]["label"] is None:
+            self.test_loader = None
 
         # Set up class information
         idx_to_class = dict((v, k) for k, v in self.train_dataset.class_to_idx.items())
@@ -268,3 +270,10 @@ class CHAOS(BaseDataset):
             legend["Liver"] = set1(0)
 
         return legend
+
+    def de_encode(self, labels):
+        """De-encode labels to match the original dataset encoding."""
+        if self.domain in ["MR", "MRI"]:
+            return labels // 63
+        elif self.domain == "CT":
+            return np.where(labels > 0, 1, 0)

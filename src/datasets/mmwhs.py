@@ -192,6 +192,10 @@ class MMWHS(BaseDataset):
             num_workers=num_workers,
             # collate_fn=lambda x: x[0] if len(x) == 1 else x,
         )
+
+        if self.test_dataset[0]["label"] is None:
+            self.test_loader = None
+
         idx_to_class = dict((v, k) for k, v in self.train_dataset.class_to_idx.items())
         self.classnames = [
             idx_to_class[i].replace("_", " ") for i in range(len(idx_to_class))
@@ -248,3 +252,19 @@ class MMWHS(BaseDataset):
                 legend[organ_name] = set1(color_idx)
 
         return legend
+
+    def de_encode(self, labels):
+        mmwhs_labels = {
+            500: 0,
+            600: 1,
+            420: 2,
+            550: 3,
+            205: 4,
+            820: 5,
+            850: 6,
+        }
+
+        de_encoded_labels = np.zeros_like(labels, dtype=np.int64)
+        for original_label, new_label in mmwhs_labels.items():
+            de_encoded_labels[labels == original_label] = new_label
+        return de_encoded_labels

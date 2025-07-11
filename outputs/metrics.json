@@ -1,0 +1,9 @@
+{
+    "CHAOS_MR_3d_baseline_hybrid": {
+        "train": {
+            "dice": 0.0,
+            "hausdorff": Infinity
+        },
+        "test": {}
+    }
+}
