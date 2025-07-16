@@ -564,7 +564,8 @@ class Medical3DSegmenter(nn.Module):
         from monai.losses import DiceCELoss
         from monai.metrics import DiceMetric
 
-        device = next(self.parameters()).device
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.to(device)
 
         # Setup loss function (Dice + Cross Entropy for medical segmentation)
         loss_function = DiceCELoss(
