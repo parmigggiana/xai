@@ -378,7 +378,7 @@ class Medical3DSegmenter(nn.Module):
                     old_wts = old_wts.to("cpu").numpy()
                     new_wts = new_wts.to("cpu").numpy()
                     diff = np.mean(np.abs(old_wts, new_wts))
-                    print("Layer {}, the update difference is: {}".format(k, diff))
+                    # print("Layer {}, the update difference is: {}".format(k, diff))
                     if abs(diff) < 1e-8:  # Use tolerance for floating point comparison
                         print("Warning: No difference found for layer {}".format(k))
             print(
