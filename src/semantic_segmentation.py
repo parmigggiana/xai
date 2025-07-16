@@ -588,8 +588,8 @@ class Medical3DSegmenter(nn.Module):
         history = {
             "train_loss": [],
             "train_dice": [],
-            "val_loss": [],
-            "val_dice": [],
+            # "val_loss": [],
+            # "val_dice": [],
         }
 
         print(f"Starting finetuning for {epochs} epochs...")
@@ -607,7 +607,8 @@ class Medical3DSegmenter(nn.Module):
 
             train_loader = self.dataset.train_loader
 
-            for batch_idx, batch in enumerate(tqdm(train_loader, desc="Training")):
+            t = tqdm(train_loader, desc="Training")
+            for batch_idx, batch in enumerate(t):
                 images = batch["image"].to(device)
                 labels = batch["label"].to(device)
 
@@ -637,11 +638,12 @@ class Medical3DSegmenter(nn.Module):
                     dice_metric.reset()
 
                 # Update tqdm with current loss and dice score
-                tqdm.set_postfix(loss=loss.item(), dice=dice_score)
+                t.set_postfix(loss=loss.item(), dice=dice_score)
             # Calculate average training metrics
             avg_train_loss = train_loss / len(train_loader)
             avg_train_dice = np.mean(train_dice_scores)
-
+            t.set_postfix(loss=avg_train_loss, dice=avg_train_dice)
+            t.close()
             # Validation phase
             self.eval()
 
@@ -657,7 +659,7 @@ class Medical3DSegmenter(nn.Module):
         print(f"\n🎉 Finetuning completed!")
         print(f"Final metrics:")
         print(f"  Final Train Dice: {history['train_dice'][-1]:.4f}")
-        print(f"  Final Val Dice: {history['val_dice'][-1]:.4f}")
+        # print(f"  Final Val Dice: {history['val_dice'][-1]:.4f}")
 
         return history
 

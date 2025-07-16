@@ -1,11 +1,11 @@
 torch>=1.12.1
 torchvision
-monai[einops,nibabel]>=1.1.0
 numpy
 pydicom
 PILlow
-napari[pyqt6, optional]==0.6.2a1
 matplotlib
-open-clip-torch
 transformers>=4.20.0
-git+https://github.com/bowang-lab/MedSAM2.git
+# git+https://github.com/bowang-lab/MedSAM2.git
+open-clip-torch
+monai[einops,nibabel]>=1.1.0
+napari[pyqt6,optional]==0.6.2a1
