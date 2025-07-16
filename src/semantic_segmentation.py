@@ -675,7 +675,7 @@ class Medical3DSegmenter(nn.Module):
         """Evaluate the model and return metrics on both train and test loaders."""
         from monai.metrics import DiceMetric, HausdorffDistanceMetric
 
-        device = next(self.parameters()).device
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.eval()
 
         dice_metric = DiceMetric(include_background=False, reduction="mean")
