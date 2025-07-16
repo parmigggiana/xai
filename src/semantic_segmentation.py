@@ -119,7 +119,8 @@ class SemanticGuidedSegmentationHead(nn.Module):
             Updated class_embeddings tensor that can be used for classification
         """
         if device is None:
-            device = next(self.text_encoder.parameters()).device
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.to(device)
 
         self.text_encoder.eval()
 
@@ -290,6 +291,7 @@ class Medical3DSegmenter(nn.Module):
         self.num_classes = num_classes
         self.dataset = dataset
         self.pretrained = pretrained
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Initialize encoder
         if encoder_type == "swin_unetr":
@@ -330,6 +332,17 @@ class Medical3DSegmenter(nn.Module):
             )
         else:
             self.use_semantic_head = False
+
+    def to(self, device):
+        """
+        Move the model to the specified device.
+        """
+        super().to(device)
+        self.device = device
+        self.encoder.to(device)
+        if self.use_semantic_head:
+            self.semantic_head.to(device)
+        return self
 
     def _load_swinvit_weights(self):
         """Load pretrained SwinViT weights from data/model_swinvit.pt"""
@@ -564,6 +577,9 @@ class Medical3DSegmenter(nn.Module):
         if self.dataset is None:
             raise ValueError("Dataset must be provided to finetune the model")
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Move model to the correct device
+        self.to(device)
 
         # Enable memory-efficient settings
         torch.backends.cudnn.benchmark = (
