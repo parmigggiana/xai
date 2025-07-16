@@ -800,6 +800,8 @@ class Medical3DSegmenter(nn.Module):
 
         results = {}
 
+        self.to(device)
+
         for split in ["train", "test"]:
             loader = getattr(self.dataset, f"{split}_loader", None)
             results[split] = {}
