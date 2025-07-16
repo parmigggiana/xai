@@ -519,24 +519,6 @@ class Medical3DSegmenter(nn.Module):
 
         return result
 
-    def _extract_resnet_features(self, x: torch.Tensor) -> torch.Tensor:
-        """Extract features from ResNet before global pooling to preserve spatial dimensions."""
-        # Based on the ResNet structure test:
-        # 0: conv1, 1: bn1, 2: act, 3: maxpool,
-        # 4: layer1, 5: layer2, 6: layer3, 7: layer4,
-        # 8: avgpool (AdaptiveAvgPool3d) <- STOP HERE
-        # 9: fc
-
-        # Apply layers up to layer4 (index 7) to preserve spatial dimensions
-        layers = list(self.encoder.children())
-
-        # Apply layers 0-7 (up to and including layer4)
-        for i in range(8):  # Stop before avgpool (index 8)
-            if i < len(layers):
-                x = layers[i](x)
-
-        return x
-
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         """
         Override call method to handle both training and inference.
@@ -763,21 +745,9 @@ class Medical3DSegmenter(nn.Module):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             return None, 0.0, False
-        except Exception as e:
-            print(f"⚠️ Error at batch {batch_idx}: {e}")
-            return None, 0.0, False
-
-    def _compute_metrics(self, outputs, labels, dice_metric):
-        """Compute dice metrics with error handling."""
-        try:
-            with torch.no_grad():
-                preds = torch.argmax(outputs, dim=1, keepdim=True)
-                dice_metric(y_pred=preds, y=labels)
-                dice_score = dice_metric.aggregate().item()
-                dice_metric.reset()
-                return dice_score
-        except Exception:
-            return None
+        # except Exception as e:
+        #     print(f"⚠️ Error at batch {batch_idx}: {e}")
+        #     return None, 0.0, False
 
     def load_task_vector(self, task_vector):
         """Load a task vector into the model."""
