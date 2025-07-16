@@ -116,29 +116,31 @@ def download_and_extract_dataset(dataset: str, base_path: str = "data/"):
         decoded_zip_file = urllib.parse.unquote(zip_file)
         zip_path = base_path / decoded_zip_file
         extract_dir = base_path / Path(decoded_zip_file).with_suffix("")
-        if not zip_path.exists():
-            zip_url = index_url + zip_file
-            print(f"Downloading {zip_url} to {zip_path}...")
-
-            def reporthook(
-                block_num, block_size, total_size, zip_file=decoded_zip_file
-            ):
-                downloaded = block_num * block_size
-                percent = (
-                    min(100, downloaded * 100 / total_size) if total_size > 0 else 0
-                )
-                print(
-                    f"\rDownloading {zip_file}: {percent:.2f}% ({downloaded // (1024 * 1024)}MB/{total_size // (1024 * 1024)}MB)",
-                    end="",
-                )
-
-            urllib.request.urlretrieve(zip_url, zip_path, reporthook)
-            print()  # Newline after download
-        # Unzip if not already extracted
         if not extract_dir.exists():
+            if not zip_path.exists():
+                zip_url = index_url + zip_file
+                print(f"Downloading {zip_url} to {zip_path}...")
+
+                def reporthook(
+                    block_num, block_size, total_size, zip_file=decoded_zip_file
+                ):
+                    downloaded = block_num * block_size
+                    percent = (
+                        min(100, downloaded * 100 / total_size) if total_size > 0 else 0
+                    )
+                    print(
+                        f"\rDownloading {zip_file}: {percent:.2f}% ({downloaded // (1024 * 1024)}MB/{total_size // (1024 * 1024)}MB)",
+                        end="",
+                    )
+
+                urllib.request.urlretrieve(zip_url, zip_path, reporthook)
+                print()  # Newline after download
+
             print(f"Extracting {zip_path} to {extract_dir}...")
             with zipfile.ZipFile(zip_path, "r") as zip_ref:
                 zip_ref.extractall(extract_dir)
+            # Remove the zip file after extraction
+            zip_path.unlink(missing_ok=True)
 
 
 def print_memory_usage(stage=""):
