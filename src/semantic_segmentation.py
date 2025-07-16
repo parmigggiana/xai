@@ -829,6 +829,10 @@ class Medical3DSegmenter(nn.Module):
                     # Compute metrics for this batch
                     dice_metric(y_pred=preds, y=labels)
                     hausdorff_metric(y_pred=preds, y=labels)
+                    
+                    # Clear cache to manage memory
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
             if has_labels:
                 try:
