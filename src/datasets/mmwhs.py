@@ -45,7 +45,10 @@ class PyTorchMMWHS(VisionDataset):
         self.slice_2d = slice_2d
 
         self.data_path_images = (
-            Path(self.base_path) / "MM-WHS 2017 Dataset" / f"{self.domain}_{self.split}"
+            Path(self.base_path)
+            / "MM-WHS 2017 Dataset"
+            / "MM-WHS 2017 Dataset"
+            / f"{self.domain}_{self.split}"
         )
 
         if self.split == "train":
