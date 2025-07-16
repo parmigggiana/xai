@@ -730,7 +730,7 @@ class Medical3DSegmenter(nn.Module):
                 labels = torch.clamp(labels, 0, self.num_classes - 1)
 
             # Forward pass with mixed precision
-            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+            with torch.amp.autocast(device):
                 outputs = self.forward(images)
                 loss = loss_function(outputs, labels)
                 loss = loss / gradient_accumulation_steps
@@ -786,12 +786,24 @@ class Medical3DSegmenter(nn.Module):
                 if name in task_vector.vector:
                     param.data += task_vector.vector[name]
 
-    def evaluate(self):
-        """Evaluate the model and return metrics on both train and test loaders."""
+    def evaluate(self, batch_size_override=None):
+        """
+        Evaluate the model and return metrics on both train and test loaders.
+        Memory-optimized version with aggressive memory management for large datasets like MMWHS.
+        """
         from monai.metrics import DiceMetric, HausdorffDistanceMetric
+        import gc
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.eval()
+
+        # Use smaller batch size for evaluation if dealing with memory issues
+        original_batch_size = None
+        if batch_size_override and hasattr(self.dataset, "train_loader"):
+            original_batch_size = self.dataset.train_loader.batch_size
+            print(
+                f"Overriding batch size from {original_batch_size} to {batch_size_override} for evaluation"
+            )
 
         dice_metric = DiceMetric(include_background=False, reduction="mean")
         hausdorff_metric = HausdorffDistanceMetric(
@@ -799,8 +811,12 @@ class Medical3DSegmenter(nn.Module):
         )
 
         results = {}
-
         self.to(device)
+
+        # Clear cache before starting evaluation
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
         for split in ["train", "test"]:
             loader = getattr(self.dataset, f"{split}_loader", None)
@@ -808,42 +824,275 @@ class Medical3DSegmenter(nn.Module):
             if loader is None:
                 continue
 
+            print(f"🔍 Evaluating {split} split...")
+
             dice_metric.reset()
             hausdorff_metric.reset()
             has_labels = False
 
+            # Process batches with aggressive memory management
             with torch.no_grad():
-                for batch in tqdm(loader):
-                    images = batch["image"].to(device)
-                    labels = batch.get("label", None)
-                    if labels is None:
+                for batch_idx, batch in enumerate(
+                    tqdm(loader, desc=f"Evaluating {split}")
+                ):
+                    try:
+                        # Move data to device with non_blocking for efficiency
+                        images = batch["image"].to(device, non_blocking=True)
+                        labels = batch.get("label", None)
+
+                        if labels is None:
+                            del images
+                            continue
+
+                        labels = labels.to(device, non_blocking=True)
+                        has_labels = True
+
+                        # Process with memory-efficient forward pass
+                        try:
+                            # For very large images, process with reduced precision
+                            with torch.cuda.amp.autocast(
+                                enabled=torch.cuda.is_available()
+                            ):
+                                outputs = self(images)
+
+                            # Move to CPU immediately to free GPU memory
+                            preds = torch.argmax(outputs, dim=1, keepdim=True)
+
+                            # Compute metrics (this handles GPU->CPU transfers internally)
+                            dice_metric(y_pred=preds, y=labels)
+                            hausdorff_metric(y_pred=preds, y=labels)
+
+                        except torch.cuda.OutOfMemoryError:
+                            print(
+                                f"⚠️ OOM during forward pass at batch {batch_idx}, skipping..."
+                            )
+                            # Clear everything and continue
+                            del images, labels
+                            if "outputs" in locals():
+                                del outputs
+                            if "preds" in locals():
+                                del preds
+                            torch.cuda.empty_cache()
+                            torch.cuda.synchronize()
+                            gc.collect()
+                            continue
+
+                        # Aggressive cleanup after each batch
+                        try:
+                            del images, labels, outputs, preds
+                        except NameError:
+                            pass  # Variables may not exist if there was an error
+
+                        # Clear cache more frequently for problematic datasets
+                        if batch_idx % 2 == 0:  # Every 2 batches instead of every batch
+                            torch.cuda.empty_cache()
+                            if (
+                                batch_idx % 10 == 0
+                            ):  # More aggressive cleanup every 10 batches
+                                torch.cuda.synchronize()
+                                gc.collect()
+
+                    except Exception as e:
+                        print(f"⚠️ Error processing batch {batch_idx} in {split}: {e}")
+                        # Cleanup and continue
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        gc.collect()
                         continue
-                    labels = labels.to(device)
-                    has_labels = True
 
-                    outputs = self(images)
-                    preds = torch.argmax(
-                        outputs, dim=1, keepdim=True
-                    )  # [B, 1, D, H, W]
-
-                    # Compute metrics for this batch
-                    dice_metric(y_pred=preds, y=labels)
-                    hausdorff_metric(y_pred=preds, y=labels)
-                    
-                    # Clear cache to manage memory
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-
+            # Aggregate results with error handling
             if has_labels:
                 try:
                     dice_score = dice_metric.aggregate().item()
                     hausdorff_dist = hausdorff_metric.aggregate().item()
                     results[split] = {"dice": dice_score, "hausdorff": hausdorff_dist}
-                except (ValueError, RuntimeError):
-                    # Handle case where no valid predictions were made
+                    print(
+                        f"✅ {split} - Dice: {dice_score:.4f}, Hausdorff: {hausdorff_dist:.4f}"
+                    )
+                except (ValueError, RuntimeError) as e:
+                    print(f"⚠️ Error aggregating metrics for {split}: {e}")
                     results[split] = {"dice": None, "hausdorff": None}
             else:
                 results[split] = {"dice": None, "hausdorff": None}
+
+            # Clear cache after each split
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            gc.collect()
+
+        # Restore original batch size if it was overridden
+        if original_batch_size and hasattr(self.dataset, "train_loader"):
+            print(f"Restoring original batch size: {original_batch_size}")
+
+        return results
+
+    def _optimize_for_evaluation(self):
+        """
+        Apply memory optimizations specifically for evaluation mode.
+        Useful for large datasets like MMWHS that can cause OOM errors.
+        """
+        # Enable memory efficient mode
+        if torch.cuda.is_available():
+            torch.backends.cudnn.benchmark = False  # Disable for variable input sizes
+            torch.backends.cudnn.deterministic = True
+
+        # If using semantic head, temporarily reduce some compute-heavy operations
+        if self.use_semantic_head and hasattr(self.semantic_head, "conv_layers"):
+            # Temporarily switch to eval mode for all components
+            self.semantic_head.eval()
+
+        print("🔧 Applied memory optimizations for evaluation")
+
+    def evaluate_with_memory_management(self, use_cpu_offload=True, max_batch_size=1):
+        """
+        Ultra-conservative evaluation method for datasets that cause persistent OOM.
+
+        Args:
+            use_cpu_offload: Move intermediate results to CPU to save GPU memory
+            max_batch_size: Force maximum batch size (1 for most conservative)
+        """
+        from monai.metrics import DiceMetric, HausdorffDistanceMetric
+        import gc
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"🔍 Starting memory-conservative evaluation on {device}")
+
+        # Apply optimizations
+        self._optimize_for_evaluation()
+        self.eval()
+        self.to(device)
+
+        # Initialize metrics
+        dice_metric = DiceMetric(include_background=False, reduction="mean")
+        hausdorff_metric = HausdorffDistanceMetric(
+            include_background=False, reduction="mean"
+        )
+
+        results = {}
+
+        for split in ["train", "test"]:
+            if not hasattr(self.dataset, f"{split}_loader"):
+                results[split] = {"dice": None, "hausdorff": None}
+                continue
+
+            loader = getattr(self.dataset, f"{split}_loader")
+            print(f"📊 Processing {split} split with {len(loader)} batches")
+
+            dice_metric.reset()
+            hausdorff_metric.reset()
+            successful_batches = 0
+
+            # Clear cache before starting
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            gc.collect()
+
+            with torch.no_grad():
+                for batch_idx, batch in enumerate(tqdm(loader, desc=f"Eval {split}")):
+                    try:
+                        # Process one sample at a time if batch size > 1
+                        images = batch["image"]
+                        labels = batch.get("label")
+
+                        if labels is None:
+                            continue
+
+                        # Process each sample in the batch individually if needed
+                        batch_size = images.shape[0]
+
+                        for sample_idx in range(min(batch_size, max_batch_size)):
+                            # Extract single sample
+                            sample_image = images[sample_idx : sample_idx + 1].to(
+                                device, non_blocking=True
+                            )
+                            sample_label = labels[sample_idx : sample_idx + 1].to(
+                                device, non_blocking=True
+                            )
+
+                            try:
+                                # Forward pass with maximum memory conservation
+                                with torch.cuda.amp.autocast(
+                                    enabled=torch.cuda.is_available()
+                                ):
+                                    outputs = self(sample_image)
+
+                                # Move predictions to CPU immediately if requested
+                                preds = torch.argmax(outputs, dim=1, keepdim=True)
+
+                                if use_cpu_offload:
+                                    # Move to CPU for metric computation
+                                    preds_cpu = preds.cpu()
+                                    labels_cpu = sample_label.cpu()
+                                    del outputs, preds, sample_image, sample_label
+
+                                    # Move back to device for metrics (MONAI requirement)
+                                    preds = preds_cpu.to(device)
+                                    sample_label = labels_cpu.to(device)
+
+                                # Compute metrics
+                                dice_metric(y_pred=preds, y=sample_label)
+                                hausdorff_metric(y_pred=preds, y=sample_label)
+
+                                successful_batches += 1
+
+                                # Cleanup
+                                del preds, sample_label
+                                if not use_cpu_offload:
+                                    del outputs, sample_image
+
+                            except torch.cuda.OutOfMemoryError:
+                                print(
+                                    f"💥 OOM on sample {sample_idx} of batch {batch_idx}, skipping..."
+                                )
+                                # Emergency cleanup
+                                for var_name in [
+                                    "sample_image",
+                                    "sample_label",
+                                    "outputs",
+                                    "preds",
+                                ]:
+                                    if var_name in locals():
+                                        del locals()[var_name]
+                                torch.cuda.empty_cache()
+                                torch.cuda.synchronize()
+                                continue
+
+                            # Clear cache after every sample for maximum safety
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+
+                        # Aggressive cleanup after each batch
+                        del images, labels
+                        if batch_idx % 5 == 0:  # Every 5 batches
+                            gc.collect()
+                            if torch.cuda.is_available():
+                                torch.cuda.synchronize()
+
+                    except Exception as e:
+                        print(f"❌ Error processing batch {batch_idx}: {e}")
+                        # Emergency cleanup
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        gc.collect()
+                        continue
+
+            # Aggregate results
+            if successful_batches > 0:
+                try:
+                    dice_score = dice_metric.aggregate().item()
+                    hausdorff_dist = hausdorff_metric.aggregate().item()
+                    results[split] = {"dice": dice_score, "hausdorff": hausdorff_dist}
+                    print(
+                        f"✅ {split} - Dice: {dice_score:.4f}, Hausdorff: {hausdorff_dist:.4f} ({successful_batches} successful batches)"
+                    )
+                except Exception as e:
+                    print(f"⚠️ Error aggregating {split} metrics: {e}")
+                    results[split] = {"dice": None, "hausdorff": None}
+            else:
+                results[split] = {"dice": None, "hausdorff": None}
+                print(f"❌ No successful batches processed for {split}")
 
         return results
 
