@@ -712,7 +712,7 @@ class Medical3DSegmenter(nn.Module):
                 labels = torch.clamp(labels, 0, self.num_classes - 1)
 
             # Forward pass with mixed precision
-            with torch.amp.autocast(device):
+            with torch.amp.autocast(device.type):
                 outputs = self.forward(images)
                 loss = loss_function(outputs, labels)
                 loss = loss / gradient_accumulation_steps
@@ -820,9 +820,7 @@ class Medical3DSegmenter(nn.Module):
                         # Process with memory-efficient forward pass
                         try:
                             # For very large images, process with reduced precision
-                            with torch.cuda.amp.autocast(
-                                enabled=torch.cuda.is_available()
-                            ):
+                            with torch.amp.autocast(device.type):
                                 outputs = self(images)
 
                             # Move to CPU immediately to free GPU memory
@@ -986,9 +984,7 @@ class Medical3DSegmenter(nn.Module):
 
                             try:
                                 # Forward pass with maximum memory conservation
-                                with torch.cuda.amp.autocast(
-                                    enabled=torch.cuda.is_available()
-                                ):
+                                with torch.amp.autocast(device.type):
                                     outputs = self(sample_image)
 
                                 # Move predictions to CPU immediately if requested
