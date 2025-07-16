@@ -977,7 +977,10 @@ class Medical3DSegmenter(nn.Module):
                 continue
 
             loader = getattr(self.dataset, f"{split}_loader")
-            print(f"📊 Processing {split} split with {len(loader)} batches")
+
+            if loader is None:
+                results[split] = {"dice": None, "hausdorff": None}
+                continue
 
             dice_metric.reset()
             hausdorff_metric.reset()
