@@ -276,4 +276,4 @@ class CHAOS(BaseDataset):
         if self.domain in ["MR", "MRI"]:
             return labels // 63
         elif self.domain == "CT":
-            return np.where(labels > 0, 1, 0)
+            return torch.where(labels > 0, 1, 0)

@@ -267,7 +267,7 @@ class MMWHS(BaseDataset):
             850: 6,
         }
 
-        de_encoded_labels = np.zeros_like(labels, dtype=np.int64)
+        de_encoded_labels = torch.zeros_like(labels)
         for original_label, new_label in mmwhs_labels.items():
             de_encoded_labels[labels == original_label] = new_label
         return de_encoded_labels
