@@ -543,38 +543,135 @@ class Medical3DSegmenter(nn.Module):
         epochs: int = 5,
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-5,
+        save_best: bool = True,
+        gradient_accumulation_steps: int = 1,
+        max_grad_norm: float = 1.0,
     ):
         """
-        Finetune the model on the dataset.
+        Memory-optimized finetune method with advanced training features.
 
         Args:
             epochs: Number of training epochs
             learning_rate: Learning rate for optimizer
             weight_decay: Weight decay for regularization
             save_best: Whether to save the best model based on validation Dice score
+            gradient_accumulation_steps: Steps to accumulate gradients (effective batch size multiplier)
+            max_grad_norm: Maximum gradient norm for clipping
 
         Returns:
             Dictionary with training history (losses, metrics)
         """
         if self.dataset is None:
             raise ValueError("Dataset must be provided to finetune the model")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Import training utilities
+        # Enable memory-efficient settings
+        torch.backends.cudnn.benchmark = (
+            True  # Optimize cudnn for consistent input sizes
+        )
+
+        print(f"🚀 Starting training for {epochs} epochs")
+        print(f"   Device: {device}")
+        print(f"   Learning Rate: {learning_rate}")
+        print(f"   Weight Decay: {weight_decay}")
+        print(f"   Gradient Accumulation Steps: {gradient_accumulation_steps}")
+
+        # Setup loss function, metrics, optimizer, and scaler
+        loss_function, dice_metric, optimizer, scaler = self._setup_training_components(
+            learning_rate, weight_decay
+        )
+
+        # Training history
+        history = {"train_loss": [], "train_dice": [], "val_loss": [], "val_dice": []}
+
+        best_train_dice = 0.0
+        best_model_state = None
+
+        for epoch in range(epochs):
+            print(f"\n📖 Epoch {epoch + 1}/{epochs}")
+
+            # Clear cache at start of each epoch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            # Training phase
+            self.train()
+            train_losses = []
+            train_dice_scores = []
+
+            train_pbar = tqdm(self.dataset.train_loader, desc="Training")
+            for batch_idx, batch in enumerate(train_pbar):
+                # Process each training batch with error handling
+                outputs, loss_value, success = self._process_training_batch(
+                    batch,
+                    device,
+                    loss_function,
+                    optimizer,
+                    scaler,
+                    gradient_accumulation_steps,
+                    max_grad_norm,
+                    batch_idx,
+                )
+
+                if success:
+                    train_losses.append(loss_value)
+
+                    # Update progress bar
+                    avg_loss = np.mean(
+                        train_losses[-3:]
+                    )  # Moving average of last 3 batches
+                    avg_dice = (
+                        np.mean(train_dice_scores[-3:]) if train_dice_scores else 0.0
+                    )
+                    train_pbar.set_postfix(
+                        {
+                            "Loss": f"{avg_loss:.4f}",
+                            "Dice": f"{avg_dice:.4f}",
+                        }
+                    )
+
+            # Record epoch results
+            epoch_train_loss = np.mean(train_losses) if train_losses else float("inf")
+            epoch_train_dice = np.mean(train_dice_scores) if train_dice_scores else 0.0
+
+            history["train_loss"].append(epoch_train_loss)
+            history["train_dice"].append(epoch_train_dice)
+
+            # Save best model (move to CPU to save GPU memory)
+            if save_best and epoch_train_dice > best_train_dice:
+                best_train_dice = epoch_train_dice
+                best_model_state = {
+                    k: v.cpu().clone() for k, v in self.state_dict().items()
+                }
+
+        # Restore best model if requested
+        if save_best and best_model_state is not None:
+            # Move back to device
+            best_model_state = {k: v.to(device) for k, v in best_model_state.items()}
+            self.load_state_dict(best_model_state)
+
+        print("\n✅ Training completed!")
+
+        return history
+
+    def _setup_training_components(self, learning_rate, weight_decay):
+        """Setup loss function, metrics, optimizer, and scaler for training."""
         import torch.optim as optim
         from monai.losses import DiceCELoss
         from monai.metrics import DiceMetric
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.to(device)
-
-        # Setup loss function (Dice + Cross Entropy for medical segmentation)
+        # Setup loss function (memory-efficient configuration)
         loss_function = DiceCELoss(
             include_background=False,
             to_onehot_y=True,
             softmax=True,
-            squared_pred=True,
-            smooth_nr=0.0,
-            smooth_dr=1e-6,
+            lambda_dice=0.5,
+            lambda_ce=0.5,
+        )
+
+        # Setup metrics with robust configuration
+        dice_metric = DiceMetric(
+            include_background=False, reduction="mean_batch", get_not_nans=True
         )
 
         # Setup optimizer
@@ -582,87 +679,89 @@ class Medical3DSegmenter(nn.Module):
             self.parameters(), lr=learning_rate, weight_decay=weight_decay
         )
 
-        # Setup metrics
-        dice_metric = DiceMetric(include_background=False, reduction="mean")
+        # Setup gradient scaler for mixed precision
+        scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
 
-        # Training history
-        history = {
-            "train_loss": [],
-            "train_dice": [],
-            # "val_loss": [],
-            # "val_dice": [],
-        }
+        return loss_function, dice_metric, optimizer, scaler
 
-        print(f"Starting finetuning for {epochs} epochs...")
-        print(f"Learning rate: {learning_rate}, Weight decay: {weight_decay}")
-        print(f"Device: {device}")
+    def _process_training_batch(
+        self,
+        batch,
+        device,
+        loss_function,
+        optimizer,
+        scaler,
+        gradient_accumulation_steps,
+        max_grad_norm,
+        batch_idx,
+    ):
+        """Process a single training batch with error handling."""
+        try:
+            images = batch["image"].to(device, non_blocking=True)
+            labels = batch["label"].to(device, non_blocking=True)
 
-        for epoch in range(epochs):
-            print(f"\nEpoch {epoch + 1}/{epochs}")
-            print("-" * 40)
+            # Ensure labels are in correct format [B, 1, D, H, W]
+            if labels.dim() == 4:  # [B, D, H, W]
+                labels = labels.unsqueeze(1)
 
-            # Training phase
-            self.train()
-            train_loss = 0.0
-            train_dice_scores = []
+            # Apply dataset-specific label decoding if available
+            if hasattr(self.dataset, "de_encode"):
+                labels = self.dataset.de_encode(labels)
 
-            train_loader = self.dataset.train_loader
+            # Validate label range
+            max_label = labels.max().item()
+            if max_label >= self.num_classes:
+                labels = torch.clamp(labels, 0, self.num_classes - 1)
 
-            t = tqdm(train_loader, desc="Training")
-            for batch_idx, batch in enumerate(t):
-                images = batch["image"].to(device)
-                labels = batch["label"].to(device)
+            # Forward pass with mixed precision
+            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                outputs = self.forward(images)
+                loss = loss_function(outputs, labels)
+                loss = loss / gradient_accumulation_steps
 
-                # Zero gradients
+            # Backward pass with gradient scaling
+            if scaler is not None:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
+
+            # Gradient accumulation step
+            if (batch_idx + 1) % gradient_accumulation_steps == 0:
+                if scaler is not None:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    torch.nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
+                    optimizer.step()
+
                 optimizer.zero_grad()
 
-                # Forward pass
-                outputs = self(images)
+            # Clean up intermediate tensors
+            del images, labels
 
-                # Compute loss
-                labels = self.dataset.de_encode(labels)
-                loss = loss_function(outputs, labels)
+            return outputs, loss.item() * gradient_accumulation_steps, True
+        except torch.cuda.OutOfMemoryError:
+            print(f"❌ OOM at batch {batch_idx}, clearing cache and continuing...")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            return None, 0.0, False
+        except Exception as e:
+            print(f"⚠️ Error at batch {batch_idx}: {e}")
+            return None, 0.0, False
 
-                # Backward pass
-                loss.backward()
-                optimizer.step()
-
-                # Accumulate metrics
-                train_loss += loss.item()
-
-                # Compute Dice score
-                with torch.no_grad():
-                    preds = torch.argmax(outputs, dim=1, keepdim=True)
-                    dice_metric(y_pred=preds, y=labels)
-                    dice_score = dice_metric.aggregate().item()
-                    train_dice_scores.append(dice_score)
-                    dice_metric.reset()
-
-                # Update tqdm with current loss and dice score
-                t.set_postfix(loss=loss.item(), dice=dice_score)
-            # Calculate average training metrics
-            avg_train_loss = train_loss / len(train_loader)
-            avg_train_dice = np.mean(train_dice_scores)
-            t.set_postfix(loss=avg_train_loss, dice=avg_train_dice)
-            t.close()
-            # Validation phase
-            self.eval()
-
-            history["train_loss"].append(avg_train_loss)
-            history["train_dice"].append(avg_train_dice)
-
-            # Print epoch summary
-            print(f"\nEpoch {epoch + 1} Summary:")
-            print(
-                f"  Train Loss: {avg_train_loss:.4f}, Train Dice: {avg_train_dice:.4f}"
-            )
-
-        print(f"\n🎉 Finetuning completed!")
-        print(f"Final metrics:")
-        print(f"  Final Train Dice: {history['train_dice'][-1]:.4f}")
-        # print(f"  Final Val Dice: {history['val_dice'][-1]:.4f}")
-
-        return history
+    def _compute_metrics(self, outputs, labels, dice_metric):
+        """Compute dice metrics with error handling."""
+        try:
+            with torch.no_grad():
+                preds = torch.argmax(outputs, dim=1, keepdim=True)
+                dice_metric(y_pred=preds, y=labels)
+                dice_score = dice_metric.aggregate().item()
+                dice_metric.reset()
+                return dice_score
+        except Exception:
+            return None
 
     def load_task_vector(self, task_vector):
         """Load a task vector into the model."""
