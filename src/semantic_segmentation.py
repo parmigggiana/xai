@@ -10,6 +10,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from monai.networks.nets.resnet import resnet50
 from monai.networks.nets import SwinUNETR
+import torch.optim as optim
+from monai.losses import DiceCELoss
+from monai.metrics import DiceMetric
+
 from typing import Dict, List, OrderedDict, Tuple
 import os
 
@@ -595,7 +599,6 @@ class Medical3DSegmenter(nn.Module):
             # Training phase
             self.train()
             train_losses = []
-            train_dice_scores = []
 
             train_pbar = tqdm(self.dataset.train_loader, desc="Training")
             for batch_idx, batch in enumerate(train_pbar):
@@ -618,22 +621,38 @@ class Medical3DSegmenter(nn.Module):
                     avg_loss = np.mean(
                         train_losses[-3:]
                     )  # Moving average of last 3 batches
-                    avg_dice = (
-                        np.mean(train_dice_scores[-3:]) if train_dice_scores else 0.0
-                    )
                     train_pbar.set_postfix(
                         {
                             "Loss": f"{avg_loss:.4f}",
-                            "Dice": f"{avg_dice:.4f}",
                         }
                     )
 
             # Record epoch results
             epoch_train_loss = np.mean(train_losses) if train_losses else float("inf")
-            epoch_train_dice = np.mean(train_dice_scores) if train_dice_scores else 0.0
+            epoch_train_dice = 0.0
+            # Compute training Dice score
+            with torch.no_grad():
+                for batch in tqdm(
+                    self.dataset.train_loader, desc="Calculating Train Dice"
+                ):
+                    images = batch["image"].to(device, non_blocking=True)
+                    labels = batch["label"].to(device, non_blocking=True)
+
+                    # Forward pass
+                    outputs = self.forward(images)
+                    preds = torch.argmax(outputs["combined"], dim=1)
+
+                    # Compute Dice score
+                    dice_metric(y_pred=preds, y=labels)
+
+                epoch_train_dice = dice_metric.aggregate().item()
+                dice_metric.reset()
 
             history["train_loss"].append(epoch_train_loss)
             history["train_dice"].append(epoch_train_dice)
+            print(
+                f"Epoch {epoch + 1} - Train Loss: {epoch_train_loss:.4f}, Train Dice: {epoch_train_dice:.4f}"
+            )
 
             # Save best model (move to CPU to save GPU memory)
             if save_best and epoch_train_dice > best_train_dice:
@@ -654,9 +673,6 @@ class Medical3DSegmenter(nn.Module):
 
     def _setup_training_components(self, learning_rate, weight_decay):
         """Setup loss function, metrics, optimizer, and scaler for training."""
-        import torch.optim as optim
-        from monai.losses import DiceCELoss
-        from monai.metrics import DiceMetric
 
         # Setup loss function (memory-efficient configuration)
         loss_function = DiceCELoss(
@@ -783,12 +799,13 @@ class Medical3DSegmenter(nn.Module):
         results = {}
         self.to(device)
 
-        # Clear cache before starting evaluation
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-
         for split in ["train", "test"]:
+            # Clear cache before each split
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            gc.collect()
+
             loader = getattr(self.dataset, f"{split}_loader", None)
             results[split] = {}
             if loader is None:
@@ -802,71 +819,31 @@ class Medical3DSegmenter(nn.Module):
 
             # Process batches with aggressive memory management
             with torch.no_grad():
+
                 for batch_idx, batch in enumerate(
                     tqdm(loader, desc=f"Evaluating {split}")
                 ):
-                    try:
-                        # Move data to device with non_blocking for efficiency
-                        images = batch["image"].to(device, non_blocking=True)
-                        labels = batch.get("label", None)
+                    # Move data to device with non_blocking for efficiency
+                    images = batch["image"].to(device, non_blocking=True)
+                    labels = batch.get("label", None)
 
-                        if labels is None:
-                            del images
-                            continue
-
-                        labels = labels.to(device, non_blocking=True)
-                        has_labels = True
-
-                        # Process with memory-efficient forward pass
-                        try:
-                            # For very large images, process with reduced precision
-                            with torch.amp.autocast(device.type):
-                                outputs = self(images)
-
-                            # Move to CPU immediately to free GPU memory
-                            preds = torch.argmax(outputs, dim=1, keepdim=True)
-
-                            # Compute metrics (this handles GPU->CPU transfers internally)
-                            dice_metric(y_pred=preds, y=labels)
-                            hausdorff_metric(y_pred=preds, y=labels)
-
-                        except torch.cuda.OutOfMemoryError:
-                            print(
-                                f"⚠️ OOM during forward pass at batch {batch_idx}, skipping..."
-                            )
-                            # Clear everything and continue
-                            del images, labels
-                            if "outputs" in locals():
-                                del outputs
-                            if "preds" in locals():
-                                del preds
-                            torch.cuda.empty_cache()
-                            torch.cuda.synchronize()
-                            gc.collect()
-                            continue
-
-                        # Aggressive cleanup after each batch
-                        try:
-                            del images, labels, outputs, preds
-                        except NameError:
-                            pass  # Variables may not exist if there was an error
-
-                        # Clear cache more frequently for problematic datasets
-                        if batch_idx % 2 == 0:  # Every 2 batches instead of every batch
-                            torch.cuda.empty_cache()
-                            if (
-                                batch_idx % 10 == 0
-                            ):  # More aggressive cleanup every 10 batches
-                                torch.cuda.synchronize()
-                                gc.collect()
-
-                    except Exception as e:
-                        print(f"⚠️ Error processing batch {batch_idx} in {split}: {e}")
-                        # Cleanup and continue
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                        gc.collect()
+                    if labels is None:
+                        del images
                         continue
+
+                    labels = labels.to(device, non_blocking=True)
+                    has_labels = True
+
+                    # For very large images, process with reduced precision
+                    with torch.amp.autocast(device.type):
+                        outputs = self(images)
+
+                    # Move to CPU immediately to free GPU memory
+                    preds = torch.argmax(outputs, dim=1, keepdim=True)
+
+                    # Compute metrics (this handles GPU->CPU transfers internally)
+                    dice_metric(y_pred=preds, y=labels)
+                    hausdorff_metric(y_pred=preds, y=labels)
 
             # Aggregate results with error handling
             if has_labels:
@@ -882,13 +859,6 @@ class Medical3DSegmenter(nn.Module):
                     results[split] = {"dice": None, "hausdorff": None}
             else:
                 results[split] = {"dice": None, "hausdorff": None}
-
-            # Clear cache after each split
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-            gc.collect()
-
         # Restore original batch size if it was overridden
         if original_batch_size and hasattr(self.dataset, "train_loader"):
             print(f"Restoring original batch size: {original_batch_size}")
