@@ -298,6 +298,7 @@ class Medical3DSegmenter(nn.Module):
         # Initialize encoder
         if encoder_type == "swin_unetr":
             self.encoder = SwinUNETR(
+                img_size=(256, 256, 256),  # Fixed input size for SwinUNETR
                 in_channels=1,
                 out_channels=num_classes,
                 feature_size=48,
@@ -643,8 +644,17 @@ class Medical3DSegmenter(nn.Module):
                     # Compute Dice score
                     dice_metric(y_pred=preds, y=labels)
 
-                epoch_train_dice = dice_metric.aggregate().item()
-                dice_metric.reset()
+            
+            dice_result = dice_metric.aggregate()
+
+            #try to fix an error            
+            #Check if dice_result is a tuple is multiple metrics
+            if isinstance(dice_result, tuple):
+                epoch_train_dice = dice_result[0].mean().item()
+            elif dice_result.numel() > 1:
+                epoch_train_dice = dice_result.mean().item()
+            else:
+                epoch_train_dice = dice_result.item()
 
             history["train_loss"].append(epoch_train_loss)
             history["train_dice"].append(epoch_train_dice)
