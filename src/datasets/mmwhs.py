@@ -209,10 +209,8 @@ class MMWHS(BaseDataset):
 
     def get_model(self):
         """Return a Medical3DSegmenter with semantic guidance for MMWHS dataset."""
-        from src.semantic_segmentation import (
-            MMWHS_CLASS_DESCRIPTIONS,
-            Medical3DSegmenter,
-        )
+        from src.semantic_segmentation import (MMWHS_CLASS_DESCRIPTIONS,
+                                               Medical3DSegmenter)
 
         class_descriptions = MMWHS_CLASS_DESCRIPTIONS[self.domain.upper()]
         num_classes = len(class_descriptions)

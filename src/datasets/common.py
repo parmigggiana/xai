@@ -6,7 +6,6 @@ import random
 import napari
 import numpy as np
 import torch
-
 # import torch.nn as nn
 import torchvision.datasets as datasets
 from matplotlib import cm
