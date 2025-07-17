@@ -298,7 +298,7 @@ class Medical3DSegmenter(nn.Module):
         # Initialize encoder
         if encoder_type == "swin_unetr":
             self.encoder = SwinUNETR(
-                img_size=(256, 256, 256),  # Fixed input size for SwinUNETR
+                #img_size=(256, 256, 256),  # Fixed input size for SwinUNETR
                 in_channels=1,
                 out_channels=num_classes,
                 feature_size=48,
