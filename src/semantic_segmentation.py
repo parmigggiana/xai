@@ -354,7 +354,9 @@ class Medical3DSegmenter(nn.Module):
             dst = "./data/ssl_pretrained_weights.pth"
             download_url(resource, dst)
             pretrained_path = os.path.normpath(dst)
-            ssl_dict = torch.load(pretrained_path, weights_only=True)
+            ssl_dict = torch.load(
+                pretrained_path, weights_only=True, map_location=self.device
+            )
             ssl_weights = ssl_dict["model"]
 
             # Generate new state dict so it can be loaded to MONAI SwinUNETR Model
@@ -535,6 +537,13 @@ class Medical3DSegmenter(nn.Module):
         if self.use_semantic_head:
             for param in self.semantic_head.parameters():
                 param.requires_grad = False
+
+    def unfreeze(self):
+        for param in self.encoder.parameters():
+            param.requires_grad = True
+        if self.use_semantic_head:
+            for param in self.semantic_head.parameters():
+                param.requires_grad = True
 
     def finetune(
         self,
@@ -872,6 +881,7 @@ class Medical3DSegmenter(nn.Module):
         if original_batch_size and hasattr(self.dataset, "train_loader"):
             print(f"Restoring original batch size: {original_batch_size}")
 
+        self.unfreeze()
         return results
 
     def _optimize_for_evaluation(self):
