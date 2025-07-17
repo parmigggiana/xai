@@ -222,8 +222,8 @@ class CHAOS(BaseDataset):
     def get_model(self):
         """Return a Medical3DSegmenter with semantic guidance for CHAOS dataset."""
         from src.semantic_segmentation import (
-            Medical3DSegmenter,
             CHAOS_CLASS_DESCRIPTIONS,
+            Medical3DSegmenter,
         )
 
         class_descriptions = CHAOS_CLASS_DESCRIPTIONS[self.domain]

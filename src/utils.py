@@ -6,9 +6,8 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-import psutil
-
 import numpy as np
+import psutil
 import torch
 import torch.nn
 from torch.utils.data import Dataset

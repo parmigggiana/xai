@@ -8,7 +8,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torchvision.datasets as datasets
-
 from matplotlib import cm
 from matplotlib.colors import ListedColormap
 from torch.utils.data import DataLoader, Dataset, Sampler

@@ -5,25 +5,23 @@ This combines the best of both worlds:
 2. Semantic-guided head training (leverage text descriptions)
 """
 
+import os
+from typing import Dict, List, OrderedDict, Tuple
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from monai.networks.nets.resnet import resnet50
-from monai.networks.nets import SwinUNETR
 import torch.optim as optim
+from monai.apps import download_url
 from monai.losses import DiceCELoss
 from monai.metrics import DiceMetric
-
-from typing import Dict, List, OrderedDict, Tuple
-import os
-
-from monai.apps import download_url
-
-import numpy as np
+from monai.networks.nets import SwinUNETR
+from monai.networks.nets.resnet import resnet50
 from tqdm import tqdm
 
 try:
-    from transformers import AutoTokenizer, AutoModel
+    from transformers import AutoModel, AutoTokenizer
 
     HAS_TRANSFORMERS = True
 except ImportError:
@@ -777,8 +775,9 @@ class Medical3DSegmenter(nn.Module):
         Evaluate the model and return metrics on both train and test loaders.
         Memory-optimized version with aggressive memory management for large datasets like MMWHS.
         """
-        from monai.metrics import DiceMetric, HausdorffDistanceMetric
         import gc
+
+        from monai.metrics import DiceMetric, HausdorffDistanceMetric
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.eval()
@@ -890,8 +889,9 @@ class Medical3DSegmenter(nn.Module):
             use_cpu_offload: Move intermediate results to CPU to save GPU memory
             max_batch_size: Force maximum batch size (1 for most conservative)
         """
-        from monai.metrics import DiceMetric, HausdorffDistanceMetric
         import gc
+
+        from monai.metrics import DiceMetric, HausdorffDistanceMetric
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"🔍 Starting memory-conservative evaluation on {device}")
