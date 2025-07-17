@@ -912,7 +912,7 @@ class Medical3DSegmenter(nn.Module):
 
         print("🔧 Applied memory optimizations for evaluation")
 
-    def evaluate_with_memory_management(self, use_cpu_offload=True, max_batch_size=1):
+    def evaluate_with_memory_management(self, max_batch_size=1):
         """
         Ultra-conservative evaluation method for datasets that cause persistent OOM.
 
@@ -990,16 +990,6 @@ class Medical3DSegmenter(nn.Module):
                                 # Move predictions to CPU immediately if requested
                                 preds = torch.argmax(outputs, dim=1, keepdim=True)
 
-                                if use_cpu_offload:
-                                    # Move to CPU for metric computation
-                                    preds_cpu = preds.cpu()
-                                    labels_cpu = sample_label.cpu()
-                                    del outputs, preds, sample_image, sample_label
-
-                                    # Move back to device for metrics (MONAI requirement)
-                                    preds = preds_cpu.to(device)
-                                    sample_label = labels_cpu.to(device)
-
                                 # Compute metrics
                                 dice_metric(y_pred=preds, y=sample_label)
                                 hausdorff_metric(y_pred=preds, y=sample_label)
@@ -1007,9 +997,7 @@ class Medical3DSegmenter(nn.Module):
                                 successful_batches += 1
 
                                 # Cleanup
-                                del preds, sample_label
-                                if not use_cpu_offload:
-                                    del outputs, sample_image
+                                del outputs, preds, sample_image, sample_label
 
                             except torch.cuda.OutOfMemoryError:
                                 print(
