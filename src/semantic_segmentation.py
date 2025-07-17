@@ -678,7 +678,7 @@ class Medical3DSegmenter(nn.Module):
         )
 
         # Setup gradient scaler for mixed precision
-        scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
+        scaler = torch.amp.GradScaler(self.device.type)
 
         return loss_function, dice_metric, optimizer, scaler
 
