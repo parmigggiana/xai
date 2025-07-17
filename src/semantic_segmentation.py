@@ -791,6 +791,7 @@ class Medical3DSegmenter(nn.Module):
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.eval()
+        self.freeze()
 
         # Use smaller batch size for evaluation if dealing with memory issues
         original_batch_size = None
@@ -847,10 +848,9 @@ class Medical3DSegmenter(nn.Module):
                     with torch.amp.autocast(device.type):
                         outputs = self(images)
 
-                    # Move to CPU immediately to free GPU memory
                     preds = torch.argmax(outputs, dim=1, keepdim=True)
 
-                    # Compute metrics (this handles GPU->CPU transfers internally)
+                    # Compute metrics
                     dice_metric(y_pred=preds, y=labels)
                     hausdorff_metric(y_pred=preds, y=labels)
 
