@@ -638,7 +638,7 @@ class Medical3DSegmenter(nn.Module):
 
                     # Forward pass
                     outputs = self.forward(images)
-                    preds = torch.argmax(outputs["combined"], dim=1)
+                    preds = torch.argmax(outputs, dim=1, keepdim=True)
 
                     # Compute Dice score
                     dice_metric(y_pred=preds, y=labels)
