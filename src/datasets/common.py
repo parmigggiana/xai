@@ -6,6 +6,7 @@ import random
 import napari
 import numpy as np
 import torch
+
 # import torch.nn as nn
 import torchvision.datasets as datasets
 from matplotlib import cm
@@ -435,7 +436,7 @@ def get_dataloader(dataset, is_train, args, image_encoder=None):
     if image_encoder is not None:
         feature_dataset = FeatureDataset(is_train, image_encoder, dataset, args.device)
         dataloader = DataLoader(
-            feature_dataset, batch_size=args.batch_size, shuffle=is_train, num_workers=0
+            feature_dataset, batch_size=args.batch_size, shuffle=is_train, num_workers=1
         )
     else:
         dataloader = dataset.train_loader if is_train else dataset.test_loader
