@@ -646,23 +646,34 @@ class Medical3DSegmenter(nn.Module):
                     images = batch["image"].to(device, non_blocking=True)
                     labels = batch["label"].to(device, non_blocking=True)
 
+                    # Ensure labels are in correct format [B, 1, D, H, W]
+                    if labels.dim() == 4:
+                        labels = labels.unsqueeze(1)
+
+                    # If dataset has de_encode, apply it
+                    if hasattr(self.dataset, "de_encode"):
+                        labels = self.dataset.de_encode(labels)
+
                     # Forward pass
-                    outputs = self.forward(images)
+                    with torch.amp.autocast(device.type):
+                        outputs = self.forward(images)
                     preds = torch.argmax(outputs, dim=1, keepdim=True)
 
-                    # Compute Dice score
                     dice_metric(y_pred=preds, y=labels)
 
             dice_result = dice_metric.aggregate()
 
-            # try to fix an error
-            # Check if dice_result is a tuple is multiple metrics
+            # Check if dice_result is a tuple of multiple metrics
             if isinstance(dice_result, tuple):
+                print("Multiple metrics returned, using first one for training Dice.")
+                print(f"Dice metrics: {dice_result}")
                 epoch_train_dice = dice_result[0].mean().item()
-            elif dice_result.numel() > 1:
+            elif hasattr(dice_result, "numel") and dice_result.numel() > 1:
+                print("Dice result is a tensor with multiple elements, averaging them.")
+                print(f"Dice result: {dice_result}")
                 epoch_train_dice = dice_result.mean().item()
             else:
-                epoch_train_dice = dice_result.item()
+                epoch_train_dice = float(dice_result)
             dice_metric.reset()
 
             history["train_loss"].append(epoch_train_loss)
@@ -694,7 +705,7 @@ class Medical3DSegmenter(nn.Module):
         # Setup loss function (memory-efficient configuration)
         loss_function = DiceCELoss(
             include_background=True,
-            to_onehot_y=False,
+            to_onehot_y=True,
             softmax=True,
             lambda_dice=0.65,
             lambda_ce=0.35,
