@@ -296,9 +296,9 @@ class Medical3DSegmenter(nn.Module):
                     if labels.dim() == 4:
                         labels = labels.unsqueeze(1)
 
-                    # If dataset has de_encode, apply it
-                    if hasattr(self.dataset, "de_encode"):
-                        labels = self.dataset.de_encode(labels)
+                    # If dataset has decode, apply it
+                    if hasattr(self.dataset, "decode"):
+                        labels = self.dataset.decode(labels)
 
                     # Forward pass
                     with torch.amp.autocast(device.type):
@@ -398,8 +398,8 @@ class Medical3DSegmenter(nn.Module):
                 labels = labels.unsqueeze(1)
 
             # Apply dataset-specific label decoding if available
-            if hasattr(self.dataset, "de_encode"):
-                labels = self.dataset.de_encode(labels)
+            if hasattr(self.dataset, "decode"):
+                labels = self.dataset.decode(labels)
 
             # Validate label range
             max_label = labels.max().item()

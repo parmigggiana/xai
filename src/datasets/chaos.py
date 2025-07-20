@@ -63,12 +63,6 @@ class PyTorchCHAOS(VisionDataset):
             Path(self.base_path) / f"CHAOS_{split_dir}" / split_dir / domain_dir
         )
         self.samples = self._load_samples()
-        self.class_to_idx = {
-            cls: i
-            for i, cls in enumerate(
-                chaos_labels_ct if self.domain == "CT" else chaos_labels_mr
-            )
-        }
 
     def _load_samples(self):
         samples = []
@@ -208,12 +202,6 @@ class CHAOS(BaseDataset):
         if self.test_dataset[0]["label"] is None:
             self.test_loader = None
 
-        # Set up class information
-        idx_to_class = dict((v, k) for k, v in self.train_dataset.class_to_idx.items())
-        self.classnames = [
-            idx_to_class[i].replace("_", " ") for i in range(len(idx_to_class))
-        ]
-
         if self.domain == "CT":
             self.num_classes = len(chaos_labels_ct)
         else:
@@ -252,8 +240,15 @@ class CHAOS(BaseDataset):
 
         return legend
 
-    def de_encode(self, labels):
-        """De-encode labels to match the original dataset encoding."""
+    def encode(self, labels):
+        """Encode labels to match the dataset encoding."""
+        if self.domain in ["MR", "MRI"]:
+            return labels * 63
+        elif self.domain == "CT":
+            return torch.where(labels > 0, 1, 0)
+
+    def decode(self, labels):
+        """Decode labels to match the original dataset encoding."""
         if self.domain in ["MR", "MRI"]:
             return labels // 63
         elif self.domain == "CT":

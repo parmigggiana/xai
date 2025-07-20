@@ -9,8 +9,16 @@ from torchvision.datasets.vision import VisionDataset
 
 from src.datasets.common import BaseDataset
 
-mmwhs_labels_ct = ["Background", "Heart", "Liver", "Spleen", "Kidneys"]
-mmwhs_labels_mr = ["Background", "Heart", "Liver", "Spleen", "Kidneys"]
+mmwhs_labels = {
+    0: "Background",
+    500: "Left ventricle blood cavity",
+    600: "Right ventricle blood cavity",
+    420: "Left atrium blood cavity",
+    550: "Right atrium blood cavity",
+    205: "Myocardium of the left ventricle",
+    820: "Ascending aorta",
+    850: "Pulmonary artery",
+}
 
 
 class PyTorchMMWHS(VisionDataset):
@@ -61,12 +69,6 @@ class PyTorchMMWHS(VisionDataset):
             )
 
         self.samples = self._load_samples()
-        self.class_to_idx = {
-            cls: i
-            for i, cls in enumerate(
-                mmwhs_labels_ct if self.domain == "ct" else mmwhs_labels_mr
-            )
-        }
 
     def _load_samples(self):
         samples = []
@@ -199,13 +201,9 @@ class MMWHS(BaseDataset):
         if self.test_dataset[0]["label"] is None:
             self.test_loader = None
 
-        idx_to_class = dict((v, k) for k, v in self.train_dataset.class_to_idx.items())
-        self.classnames = [
-            idx_to_class[i].replace("_", " ") for i in range(len(idx_to_class))
-        ]
-        self.num_classes = len(self.classnames)
         self.domain = domain
         self.slice_2d = slice_2d
+        self.num_classes = len(mmwhs_labels)
 
     def visualize_3d(self, sample):
         self._visualize_3d(
@@ -221,34 +219,28 @@ class MMWHS(BaseDataset):
 
     def _get_organ_legend(self, seg_slice):
         legend = {}
-        mmwhs_labels = [
-            (500, "Left ventricle blood cavity", 0),
-            (600, "Right ventricle blood cavity", 1),
-            (420, "Left atrium blood cavity", 2),
-            (550, "Right atrium blood cavity", 3),
-            (205, "Myocardium of the left ventricle", 4),
-            (820, "Ascending aorta", 5),
-            (850, "Pulmonary artery", 6),
-        ]
+
         set1 = cm.get_cmap("Set1", 8)
-        for label_val, organ_name, color_idx in mmwhs_labels:
+        for i, label_val, organ_name in enumerate(mmwhs_labels):
             if np.any(seg_slice == label_val):
-                legend[organ_name] = set1(color_idx)
+                legend[organ_name] = set1(i + 1)  # Skip the first color (background)
 
         return legend
 
-    def de_encode(self, labels):
-        mmwhs_labels = {
-            500: 0,
-            600: 1,
-            420: 2,
-            550: 3,
-            205: 4,
-            820: 5,
-            850: 6,
-        }
+    def encode(self, labels):
+        """
+        Encode the labels to their corresponding values.
+        """
+        encoded_labels = np.zeros_like(labels, dtype=np.int64)
+        for i, (label_val, organ_name) in enumerate(mmwhs_labels.items()):
+            encoded_labels[labels == i] = label_val
+        return encoded_labels
 
-        de_encoded_labels = torch.zeros_like(labels)
-        for original_label, new_label in mmwhs_labels.items():
-            de_encoded_labels[labels == original_label] = new_label
-        return de_encoded_labels
+    def decode(self, labels):
+        """
+        Decode the labels to their original values.
+        """
+        decoded_labels = np.zeros_like(labels, dtype=np.int64)
+        for i, label_val, organ_name in enumerate(mmwhs_labels.items()):
+            decoded_labels[labels == label_val] = i
+        return decoded_labels
