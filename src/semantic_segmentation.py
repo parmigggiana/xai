@@ -1,12 +1,5 @@
-"""
-Hybrid approach: 3D medical segmentation with semantic guidance.
-This combines the best of both worlds:
-1. 3D medical pretrained encoders (preserve spatial context)
-2. Semantic-guided head training (leverage text descriptions)
-"""
-
 import os
-from typing import Dict, List, OrderedDict, Tuple
+from typing import OrderedDict, Tuple
 
 import numpy as np
 import torch
@@ -17,259 +10,7 @@ from monai.apps import download_url
 from monai.losses import DiceCELoss
 from monai.metrics import DiceMetric
 from monai.networks.nets import SwinUNETR
-from monai.networks.nets.resnet import resnet50
 from tqdm import tqdm
-
-try:
-    from transformers import AutoModel, AutoTokenizer
-
-    HAS_TRANSFORMERS = True
-except ImportError:
-    HAS_TRANSFORMERS = False
-    print(
-        "Warning: transformers not available. Install with: pip install transformers>=4.20.0"
-    )
-
-
-class SemanticGuidedSegmentationHead(nn.Module):
-    """
-    A segmentation head that uses semantic text embeddings to guide class predictions.
-    This bridges the gap between CLIP-style semantic guidance and 3D medical segmentation.
-    """
-
-    def __init__(
-        self,
-        feature_dim: int,
-        num_classes: int,
-        class_descriptions: List[str],
-        text_model_name: str = "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract",
-    ):
-        super().__init__()
-        self.num_classes = num_classes
-        self.feature_dim = feature_dim
-
-        # Load biomedical text encoder for semantic guidance
-        self.tokenizer = AutoTokenizer.from_pretrained(text_model_name)
-        self.text_encoder = AutoModel.from_pretrained(text_model_name)
-
-        # Get text embeddings for each class
-        self.class_embeddings = self._compute_class_embeddings(class_descriptions)
-
-        # 3D segmentation layers with increased middle layer sizes (deeper and wider network)
-        self.conv_layers = nn.Sequential(
-            nn.Conv3d(feature_dim, 1024, kernel_size=3, padding=1),
-            nn.BatchNorm3d(1024),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(1024, 1024, kernel_size=3, padding=1),
-            nn.BatchNorm3d(1024),
-            nn.ReLU(inplace=True),
-        )
-
-        # Semantic alignment layer - updated for increased channels
-        text_dim = self.class_embeddings.shape[1]
-        self.semantic_projection = nn.Linear(1024, text_dim)
-
-        # Final classification layer - updated for increased channels
-        self.classifier = nn.Conv3d(1024, num_classes, kernel_size=1)
-
-        # Reduced upsampling decoder (only one upsampling step)
-        # self.upsampling_decoder = nn.Sequential(
-        #     nn.ConvTranspose3d(num_classes, 32, kernel_size=4, stride=2, padding=1),
-        #     nn.BatchNorm3d(32),
-        #     nn.ReLU(inplace=True),
-        #     nn.Conv3d(32, num_classes, kernel_size=3, padding=1),
-        # )
-        self.upsampling_decoder = nn.Identity()
-
-    def _compute_class_embeddings(self, class_descriptions: List[str]) -> torch.Tensor:
-        """Compute text embeddings for each class description."""
-        embeddings = []
-
-        with torch.no_grad():
-            for desc in class_descriptions:
-                inputs = self.tokenizer(
-                    desc,
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=512,
-                )
-                outputs = self.text_encoder(**inputs)
-                # Use CLS token embedding
-                embedding = outputs.last_hidden_state[:, 0, :].squeeze()
-                embeddings.append(embedding)
-
-        return torch.stack(embeddings)
-
-    def train_classification_head(
-        self,
-        classnames: List[str],
-        templates: List[str],
-        device: torch.device = None,
-        logit_scale: float = 1.0,
-    ):
-        """
-        Build classification head weights using text embeddings similar to CLIP zero-shot classification.
-
-        Args:
-            classnames: List of class names to build embeddings for
-            templates: List of template strings with {} placeholder for class names
-            device: Device to run computation on
-            logit_scale: Scale factor for logits (similar to CLIP's logit_scale)
-
-        Returns:
-            Updated class_embeddings tensor that can be used for classification
-        """
-        if device is None:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.to(device)
-
-        self.text_encoder.eval()
-
-        print("Building classification head for semantic segmentation.")
-        with torch.no_grad():
-            zeroshot_weights = []
-
-            for classname in tqdm(classnames):
-                texts = []
-                # Apply each template to the classname
-                for template in templates:
-                    if "{}" in template:
-                        texts.append(template.format(classname))
-                    else:
-                        # If no placeholder, just append template + classname
-                        texts.append(f"{template} {classname}")
-
-                # Tokenize all text variations for this class
-                text_embeddings = []
-                for text in texts:
-                    inputs = self.tokenizer(
-                        text,
-                        return_tensors="pt",
-                        padding=True,
-                        truncation=True,
-                        max_length=512,
-                    )
-                    inputs = {k: v.to(device) for k, v in inputs.items()}
-
-                    outputs = self.text_encoder(**inputs)
-                    # Use CLS token embedding
-                    embedding = outputs.last_hidden_state[:, 0, :].squeeze()
-
-                    # Normalize embedding
-                    embedding = embedding / embedding.norm(dim=-1, keepdim=True)
-                    text_embeddings.append(embedding)
-
-                # Average embeddings across templates for this class
-                class_embedding = torch.stack(text_embeddings).mean(dim=0, keepdim=True)
-                # Normalize again after averaging
-                class_embedding = class_embedding / class_embedding.norm()
-
-                zeroshot_weights.append(class_embedding)
-
-            # Stack all class embeddings
-            zeroshot_weights = torch.stack(zeroshot_weights, dim=0).to(
-                device
-            )  # [num_classes, 1, text_dim]
-            zeroshot_weights = zeroshot_weights.squeeze(1)  # [num_classes, text_dim]
-
-            # Apply logit scaling (similar to CLIP)
-            if (
-                abs(logit_scale - 1.0) > 1e-8
-            ):  # Use tolerance for floating point comparison
-                zeroshot_weights = zeroshot_weights * logit_scale
-
-            # Transpose to match expected format [text_dim, num_classes] for matrix multiplication
-            zeroshot_weights = zeroshot_weights.t()  # [text_dim, num_classes]
-
-        # Update the class embeddings
-        self.class_embeddings = zeroshot_weights.t()  # Store as [num_classes, text_dim]
-
-        print(f"Classification head built with shape: {self.class_embeddings.shape}")
-        return self.class_embeddings
-
-    def forward(self, features: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """
-        Forward pass with semantic guidance - memory optimized version.
-
-        Args:
-            features: [B, C, D, H, W] feature maps from encoder
-
-        Returns:
-            Dict containing logits and semantic alignment scores
-        """
-        # Apply conv layers
-        x = self.conv_layers(features)  # [B, 64, D, H, W] - reduced channels
-
-        # Compute semantic alignment with chunked processing to save memory
-        B, C, D, H, W = x.shape
-
-        # Process in smaller chunks to reduce memory usage
-        chunk_size = min(D * H * W // 4, 1024)  # Process in chunks of max 1024 pixels
-        semantic_scores_list = []
-
-        # Get class embeddings once
-        class_embeddings = self.class_embeddings.to(x.device)  # [num_classes, text_dim]
-
-        # Reshape for processing
-        x_reshaped = x.permute(0, 2, 3, 4, 1).reshape(B, -1, C)  # [B, D*H*W, 64]
-
-        # Process each batch separately to save memory
-        for b in range(B):
-            batch_scores = []
-            x_batch = x_reshaped[b]  # [D*H*W, 64]
-
-            # Process in chunks
-            for i in range(0, x_batch.shape[0], chunk_size):
-                chunk = x_batch[i : i + chunk_size]  # [chunk_size, 64]
-
-                semantic_features = self.semantic_projection(
-                    chunk
-                )  # [chunk_size, text_dim]
-
-                # Compute similarity with class embeddings
-                chunk_scores = torch.mm(
-                    semantic_features, class_embeddings.t()
-                )  # [chunk_size, num_classes]
-                batch_scores.append(chunk_scores)
-
-            # Concatenate chunks back together
-            batch_scores = torch.cat(batch_scores, dim=0)  # [D*H*W, num_classes]
-            semantic_scores_list.append(batch_scores)
-
-        # Stack batches and reshape
-        semantic_scores = torch.stack(
-            semantic_scores_list, dim=0
-        )  # [B, D*H*W, num_classes]
-
-        semantic_scores = semantic_scores.reshape(B, D, H, W, self.num_classes)
-
-        semantic_scores = semantic_scores.permute(
-            0, 4, 1, 2, 3
-        )  # [B, num_classes, D, H, W]
-
-        # Main classification
-        logits = self.classifier(x)  # [B, num_classes, D, H, W]
-
-        # Apply upsampling to restore original spatial dimensions
-        upsampled_logits = self.upsampling_decoder(logits)
-
-        # Upsample semantic scores to match logits dimensions
-        upsampled_semantic_scores = nn.functional.interpolate(
-            semantic_scores,
-            size=upsampled_logits.shape[2:],  # Target spatial dimensions [D, H, W]
-            mode="trilinear",
-            align_corners=False,
-        )
-
-        # Combine semantic and convolutional predictions
-        combined = 0.7 * upsampled_semantic_scores + 0.3 * upsampled_logits
-
-        return {
-            "semantic": upsampled_semantic_scores,
-            "logits": upsampled_logits,
-            "combined": combined,
-        }
 
 
 class Medical3DSegmenter(nn.Module):
@@ -282,7 +23,6 @@ class Medical3DSegmenter(nn.Module):
         self,
         encoder_type: str = "swin_unetr",
         num_classes: int = 2,
-        class_descriptions: List[str] = None,
         pretrained: bool = True,
         dataset=None,
     ):
@@ -298,7 +38,6 @@ class Medical3DSegmenter(nn.Module):
         # Initialize encoder
         if encoder_type == "swin_unetr":
             self.encoder = SwinUNETR(
-                # img_size=(256, 256, 256),  # Fixed input size for SwinUNETR
                 in_channels=1,
                 out_channels=num_classes,
                 feature_size=48,
@@ -306,35 +45,13 @@ class Medical3DSegmenter(nn.Module):
                 attn_drop_rate=0.0,
                 dropout_path_rate=0.0,
             )
-            feature_dim = 768  # Adjusted: feature_dim = feature_size * 16
+            # feature_dim = 768
 
             # Load pretrained SwinViT weights if available
             if pretrained:
                 self._load_swinvit_weights()
-
-        elif encoder_type == "resnet":
-            # Create ResNet but we'll modify it to preserve spatial dimensions
-            self.encoder = resnet50(
-                pretrained=pretrained,
-                n_input_channels=1,
-                feed_forward=False,
-                shortcut_type="B",
-                bias_downsample=False,
-            )
-            feature_dim = 2048
         else:
             raise ValueError(f"Unknown encoder type: {encoder_type}")
-
-        # Semantic-guided head (if descriptions provided)
-        if class_descriptions:
-            self.use_semantic_head = True
-            self.semantic_head = SemanticGuidedSegmentationHead(
-                feature_dim=feature_dim,
-                num_classes=num_classes,
-                class_descriptions=class_descriptions,
-            )
-        else:
-            self.use_semantic_head = False
 
     def to(self, device):
         """
@@ -343,8 +60,6 @@ class Medical3DSegmenter(nn.Module):
         super().to(device)
         self.device = device
         self.encoder.to(device)
-        if self.use_semantic_head:
-            self.semantic_head.to(device)
         return self
 
     def _load_swinvit_weights(self):
@@ -409,57 +124,6 @@ class Medical3DSegmenter(nn.Module):
         except Exception as e:
             print(f"Error loading SwinViT weights: {e}")
 
-    def _preprocess_input(
-        self, x: torch.Tensor
-    ) -> Tuple[torch.Tensor, Tuple[int, int, int]]:
-        """
-        Preprocess input by resampling to 256x256 while keeping depth the same.
-
-        Args:
-            x: Input tensor [B, C, D, H, W]
-
-        Returns:
-            Tuple of (preprocessed_tensor, original_spatial_size)
-        """
-        original_size = x.shape[2:]  # (D, H, W)
-
-        # Only resample H and W dimensions to 256x256, keep D unchanged
-        target_size = (original_size[0], 256, 256)  # (D, 256, 256)
-
-        if original_size[1:] != (
-            256,
-            256,
-        ):  # Only resample if H,W are not already 256x256
-            print(f"Resampling from {original_size} to {target_size}")
-            x = F.interpolate(
-                x, size=target_size, mode="trilinear", align_corners=False
-            )
-
-        return x, original_size
-
-    def _postprocess_output(
-        self, result: torch.Tensor, original_size: Tuple[int, int, int]
-    ) -> torch.Tensor:
-        """
-        Postprocess output by resampling back to original spatial dimensions.
-
-        Args:
-            result: Model output tensor [B, C, D, H, W]
-            original_size: Original spatial dimensions (D, H, W)
-
-        Returns:
-            Tensor resampled to original spatial dimensions
-        """
-        current_size = result.shape[2:]  # (D, H, W)
-
-        if current_size != original_size:
-            print(f"Resampling output from {current_size} to {original_size}")
-            result = F.interpolate(
-                result, size=original_size, mode="trilinear", align_corners=False
-            )
-
-        return result
-
     def _pad_input_for_swin_unetr(self, x: torch.Tensor) -> Tuple[torch.Tensor, int]:
         """Pads the input tensor's depth to be divisible by 32 for SwinUNETR."""
         original_shape = (x.shape[2], x.shape[3], x.shape[4])
@@ -503,19 +167,7 @@ class Medical3DSegmenter(nn.Module):
         # x, original_size = self._preprocess_input(x)
         x, original_shape = self._pad_input_for_swin_unetr(x)
 
-        if self.use_semantic_head:
-            # Extract features for semantic guidance
-            if self.encoder_type == "swin_unetr":
-                features = self.encoder.swinViT(x)[-1]
-
-            elif self.encoder_type == "resnet":
-                features = self._extract_resnet_features(x)
-
-            outputs = self.semantic_head(features)
-            result = outputs["combined"]  # Use semantic-guided predictions
-        else:
-            # Direct encoder output (for models without semantic head)
-            result = self.encoder(x)
+        result = self.encoder(x)
 
         result = self._crop_output_to_original_size(result, original_shape)
 
@@ -534,16 +186,10 @@ class Medical3DSegmenter(nn.Module):
     def freeze(self):
         for param in self.encoder.parameters():
             param.requires_grad = False
-        if self.use_semantic_head:
-            for param in self.semantic_head.parameters():
-                param.requires_grad = False
 
     def unfreeze(self):
         for param in self.encoder.parameters():
             param.requires_grad = True
-        if self.use_semantic_head:
-            for param in self.semantic_head.parameters():
-                param.requires_grad = True
 
     def finetune(
         self,
@@ -703,16 +349,23 @@ class Medical3DSegmenter(nn.Module):
         """Setup loss function, metrics, optimizer, and scaler for training."""
 
         # Setup loss function (memory-efficient configuration)
+        # Custom class weights: reduce background weight (assume background is class 0)
+        class_weights = torch.ones(
+            self.num_classes, dtype=torch.float32, device=self.device
+        )
+        class_weights[0] = 0.2  # Reduce background weight (adjust as needed)
+
         loss_function = DiceCELoss(
             include_background=True,
             to_onehot_y=True,
             softmax=True,
-            lambda_dice=0.65,
-            lambda_ce=0.35,
+            lambda_dice=0.7,
+            lambda_ce=0.3,
+            weight=class_weights,
         )
 
-        # Setup metrics with robust configuration
-        dice_metric = DiceMetric(include_background=True, reduction="mean")
+        # Setup metrics
+        dice_metric = DiceMetric(include_background=False, reduction="mean")
 
         # Setup optimizer
         optimizer = optim.AdamW(
@@ -891,165 +544,6 @@ class Medical3DSegmenter(nn.Module):
             print(f"Restoring original batch size: {original_batch_size}")
 
         self.unfreeze()
-        return results
-
-    def _optimize_for_evaluation(self):
-        """
-        Apply memory optimizations specifically for evaluation mode.
-        Useful for large datasets like MMWHS that can cause OOM errors.
-        """
-        # Enable memory efficient mode
-        if torch.cuda.is_available():
-            torch.backends.cudnn.benchmark = False  # Disable for variable input sizes
-            torch.backends.cudnn.deterministic = True
-
-        # If using semantic head, temporarily reduce some compute-heavy operations
-        if self.use_semantic_head and hasattr(self.semantic_head, "conv_layers"):
-            # Temporarily switch to eval mode for all components
-            self.semantic_head.eval()
-
-        print("🔧 Applied memory optimizations for evaluation")
-
-    def evaluate_with_memory_management(self, max_batch_size=1):
-        """
-        Ultra-conservative evaluation method for datasets that cause persistent OOM.
-
-        Args:
-            use_cpu_offload: Move intermediate results to CPU to save GPU memory
-            max_batch_size: Force maximum batch size (1 for most conservative)
-        """
-        import gc
-
-        from monai.metrics import DiceMetric, HausdorffDistanceMetric
-
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"🔍 Starting memory-conservative evaluation on {device}")
-
-        # Apply optimizations
-        self._optimize_for_evaluation()
-        self.eval()
-        self.to(device)
-
-        # Initialize metrics
-        dice_metric = DiceMetric(include_background=False, reduction="mean")
-        hausdorff_metric = HausdorffDistanceMetric(
-            include_background=False, reduction="mean"
-        )
-
-        results = {}
-
-        for split in ["train", "test"]:
-            if not hasattr(self.dataset, f"{split}_loader"):
-                results[split] = {"dice": None, "hausdorff": None}
-                continue
-
-            loader = getattr(self.dataset, f"{split}_loader")
-
-            if loader is None:
-                results[split] = {"dice": None, "hausdorff": None}
-                continue
-
-            dice_metric.reset()
-            hausdorff_metric.reset()
-            successful_batches = 0
-
-            # Clear cache before starting
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-            gc.collect()
-
-            with torch.no_grad():
-                for batch_idx, batch in enumerate(tqdm(loader, desc=f"Eval {split}")):
-                    try:
-                        # Process one sample at a time if batch size > 1
-                        images = batch["image"]
-                        labels = batch.get("label")
-
-                        if labels is None:
-                            continue
-
-                        # Process each sample in the batch individually if needed
-                        batch_size = images.shape[0]
-
-                        for sample_idx in range(min(batch_size, max_batch_size)):
-                            # Extract single sample
-                            sample_image = images[sample_idx : sample_idx + 1].to(
-                                device, non_blocking=True
-                            )
-                            sample_label = labels[sample_idx : sample_idx + 1].to(
-                                device, non_blocking=True
-                            )
-
-                            try:
-                                # Forward pass with maximum memory conservation
-                                with torch.amp.autocast(device.type):
-                                    outputs = self(sample_image)
-
-                                # Move predictions to CPU immediately if requested
-                                preds = torch.argmax(outputs, dim=1, keepdim=True)
-
-                                # Compute metrics
-                                dice_metric(y_pred=preds, y=sample_label)
-                                hausdorff_metric(y_pred=preds, y=sample_label)
-
-                                successful_batches += 1
-
-                                # Cleanup
-                                del outputs, preds, sample_image, sample_label
-
-                            except torch.cuda.OutOfMemoryError:
-                                print(
-                                    f"💥 OOM on sample {sample_idx} of batch {batch_idx}, skipping..."
-                                )
-                                # Emergency cleanup
-                                for var_name in [
-                                    "sample_image",
-                                    "sample_label",
-                                    "outputs",
-                                    "preds",
-                                ]:
-                                    if var_name in locals():
-                                        del locals()[var_name]
-                                torch.cuda.empty_cache()
-                                torch.cuda.synchronize()
-                                continue
-
-                            # Clear cache after every sample for maximum safety
-                            if torch.cuda.is_available():
-                                torch.cuda.empty_cache()
-
-                        # Aggressive cleanup after each batch
-                        del images, labels
-                        if batch_idx % 5 == 0:  # Every 5 batches
-                            gc.collect()
-                            if torch.cuda.is_available():
-                                torch.cuda.synchronize()
-
-                    except Exception as e:
-                        print(f"❌ Error processing batch {batch_idx}: {e}")
-                        # Emergency cleanup
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                        gc.collect()
-                        continue
-
-            # Aggregate results
-            if successful_batches > 0:
-                try:
-                    dice_score = dice_metric.aggregate().item()
-                    hausdorff_dist = hausdorff_metric.aggregate().item()
-                    results[split] = {"dice": dice_score, "hausdorff": hausdorff_dist}
-                    print(
-                        f"✅ {split} - Dice: {dice_score:.4f}, Hausdorff: {hausdorff_dist:.4f} ({successful_batches} successful batches)"
-                    )
-                except Exception as e:
-                    print(f"⚠️ Error aggregating {split} metrics: {e}")
-                    results[split] = {"dice": None, "hausdorff": None}
-            else:
-                results[split] = {"dice": None, "hausdorff": None}
-                print(f"❌ No successful batches processed for {split}")
-
         return results
 
 

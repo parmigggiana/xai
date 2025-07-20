@@ -219,23 +219,6 @@ class CHAOS(BaseDataset):
         else:
             self.num_classes = len(chaos_labels_mr)
 
-    def get_model(self):
-        """Return a Medical3DSegmenter with semantic guidance for CHAOS dataset."""
-        from src.semantic_segmentation import (CHAOS_CLASS_DESCRIPTIONS,
-                                               Medical3DSegmenter)
-
-        class_descriptions = CHAOS_CLASS_DESCRIPTIONS[self.domain]
-        num_classes = len(class_descriptions)
-
-        model = Medical3DSegmenter(
-            encoder_type="swin_unetr",
-            num_classes=num_classes,
-            class_descriptions=class_descriptions,
-            pretrained=True,
-        )
-        model.dataset = self
-        return model
-
     def visualize_3d(self, sample):
         self._visualize_3d(
             sample,

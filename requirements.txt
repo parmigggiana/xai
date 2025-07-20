@@ -4,8 +4,8 @@ numpy
 pydicom
 PILlow
 matplotlib
-transformers
+# transformers
 # git+https://github.com/bowang-lab/MedSAM2.git
-open-clip-torch
+# open-clip-torch
 monai[einops,nibabel]>=1.5.0
 napari[pyqt6,optional]

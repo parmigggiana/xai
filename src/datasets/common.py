@@ -1,48 +1,16 @@
 import collections
 import glob
 import os
-import random
 
 import napari
 import numpy as np
 import torch
-
-# import torch.nn as nn
-import torchvision.datasets as datasets
 from matplotlib import cm
 from matplotlib.colors import ListedColormap
-from torch.utils.data import DataLoader, Dataset, Sampler
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-# from src.modeling_seg import ImageEncoder, ImageSegmenter  # , SegmentationHead
-
-
-class SubsetSampler(Sampler):
-    def __init__(self, indices):
-        self.indices = indices
-
-    def __iter__(self):
-        return (i for i in self.indices)
-
-    def __len__(self):
-        return len(self.indices)
-
-
-class ImageFolderWithPaths(datasets.ImageFolder):
-    def __init__(self, path, transform, flip_label_prob=0.0):
-        super().__init__(path, transform)
-        self.flip_label_prob = flip_label_prob
-        if self.flip_label_prob > 0:
-            print(f"Flipping labels with probability {self.flip_label_prob}")
-            num_classes = len(self.classes)
-            for i in range(len(self.samples)):
-                if random.random() < self.flip_label_prob:
-                    new_label = random.randint(0, num_classes - 1)
-                    self.samples[i] = (self.samples[i][0], new_label)
-
-    def __getitem__(self, index):
-        image, label = super(ImageFolderWithPaths, self).__getitem__(index)
-        return {"images": image, "labels": label, "image_paths": self.samples[index][0]}
+from src.semantic_segmentation import Medical3DSegmenter
 
 
 class BaseDataset:
@@ -60,138 +28,17 @@ class BaseDataset:
             legend[label] = set1(idx % set1.N)
         return legend
 
-    # def build_segmentation_head(
-    #     self,
-    #     feature_dim,
-    #     dataset_name,
-    #     data_location,
-    #     device,
-    #     num_classes=None,
-    #     classnames=None,
-    # ):
-    #     """Build a segmentation head for volumetric or 2D segmentation tasks."""
-    #     if num_classes is None:
-    #         if classnames is None:
-    #             # Import here to avoid circular imports
-    #             from src.datasets.registry import get_dataset
-
-    #             dataset = get_dataset(dataset_name, None, location=data_location)
-    #             num_classes = len(dataset.classnames)
-    #         else:
-    #             num_classes = len(classnames)
-
-    #     if getattr(self, "slice_2d", False):
-    #         # 2D segmentation head
-    #         segmentation_head = nn.Sequential(
-    #             nn.Conv2d(feature_dim, 256, kernel_size=3, padding=1),
-    #             nn.BatchNorm2d(256),
-    #             nn.ReLU(inplace=True),
-    #             nn.Conv2d(256, 128, kernel_size=3, padding=1),
-    #             nn.BatchNorm2d(128),
-    #             nn.ReLU(inplace=True),
-    #             nn.Conv2d(128, num_classes, kernel_size=1),
-    #         ).to(device)
-    #     else:
-    #         # 3D segmentation head
-    #         segmentation_head = nn.Sequential(
-    #             nn.Conv3d(feature_dim, 256, kernel_size=3, padding=1),
-    #             nn.BatchNorm3d(256),
-    #             nn.ReLU(inplace=True),
-    #             nn.Conv3d(256, 128, kernel_size=3, padding=1),
-    #             nn.BatchNorm3d(128),
-    #             nn.ReLU(inplace=True),
-    #             nn.Conv3d(128, num_classes, kernel_size=1),
-    #         ).to(device)
-
-    #     return segmentation_head
-
-    # def get_segmentation_head(self, save_path, cache_dir=None):
-    #     filename = os.path.join(
-    #         save_path,
-    #         f"head_{self.name}_{self.domain}_{'2d' if self.slice_2d else '3d'}.pt",
-    #     )
-    #     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    #     if self.slice_2d:
-    #         base_encoder = "ViT-B-32"
-    #     else:
-    #         base_encoder = "RN50"
-
-    #     feature_dim = ImageEncoder(
-    #         model=base_encoder, keep_lang=True, cache_dir=cache_dir
-    #     ).model.visual.output_dim
-
-    #     if os.path.exists(filename):
-    #         print(
-    #             f"Segmentation head for {self.name} {self.domain} {'2D' if self.slice_2d else '3D'} exists at {filename}"
-    #         )
-    #         # Build the segmentation head and load the state dict
-    #         segmentation_head = self.build_segmentation_head(
-    #             feature_dim,
-    #             self.name,
-    #             data_location="data/",
-    #             device=device,
-    #             num_classes=self.num_classes,
-    #         )
-    #         segmentation_head.load_state_dict(torch.load(filename, map_location=device))
-    #         return segmentation_head
-
-    #     print(
-    #         f"Did not find segmentation head for {self.name} {self.domain} {'2D' if self.slice_2d else '3D'} at {filename}, building one from scratch."
-    #     )
-
-    #     segmentation_head = self.build_segmentation_head(
-    #         feature_dim,
-    #         self.name,
-    #         data_location="data/",
-    #         device=device,
-    #         num_classes=self.num_classes,
-    #     )
-
-    #     os.makedirs(save_path, exist_ok=True)
-    #     torch.save(segmentation_head.state_dict(), filename)
-    #     return segmentation_head
-
-    # def get_model(self, save_path):
-    #     # Build a ImageSegmenter
-    #     image_encoder = ImageEncoder(
-    #         model="ViT-B-32", keep_lang=False, cache_dir=".cache/"
-    #     )
-    #     segmentation_head = self.get_segmentation_head(save_path=save_path)
-    #     model = ImageSegmenter(
-    #         image_encoder=image_encoder,
-    #         segmentation_head=segmentation_head,
-    #         dataset=self,
-    #     )
-    #     return model
-
-    def get_hybrid_model(self, encoder_type="swin_unetr", use_semantic_head=True):
+    def get_model(self, encoder_type="swin_unetr"):
         """
-        Return a hybrid Medical3DSegmenter with semantic guidance.
-        This is an alternative to get_model that uses the semantic_segmentation approach.
-
         Args:
             encoder_type (str): Type of encoder to use ('swin_unetr' or 'resnet')
-            use_semantic_head (bool): Whether to use semantic guidance
 
         Returns:
             Medical3DSegmenter: Model with semantic guidance capabilities
         """
-        from src.semantic_segmentation import Medical3DSegmenter
-
-        # Get class descriptions if available, otherwise use generic ones
-        # Only pass class_descriptions if use_semantic_head is True
-        if use_semantic_head:
-            class_descriptions = getattr(
-                self, "classnames", [f"Class {i}" for i in range(self.num_classes)]
-            )
-        else:
-            class_descriptions = None
-
         model = Medical3DSegmenter(
             encoder_type=encoder_type,
             num_classes=self.num_classes,
-            class_descriptions=class_descriptions,
             pretrained=True,
             dataset=self,
         )

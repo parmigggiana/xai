@@ -207,23 +207,6 @@ class MMWHS(BaseDataset):
         self.domain = domain
         self.slice_2d = slice_2d
 
-    def get_model(self):
-        """Return a Medical3DSegmenter with semantic guidance for MMWHS dataset."""
-        from src.semantic_segmentation import (MMWHS_CLASS_DESCRIPTIONS,
-                                               Medical3DSegmenter)
-
-        class_descriptions = MMWHS_CLASS_DESCRIPTIONS[self.domain.upper()]
-        num_classes = len(class_descriptions)
-
-        model = Medical3DSegmenter(
-            encoder_type="swin_unetr",
-            num_classes=num_classes,
-            class_descriptions=class_descriptions,
-            pretrained=True,
-        )
-        model.dataset = self
-        return model
-
     def visualize_3d(self, sample):
         self._visualize_3d(
             sample,
