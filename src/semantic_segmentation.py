@@ -712,9 +712,7 @@ class Medical3DSegmenter(nn.Module):
         )
 
         # Setup metrics with robust configuration
-        dice_metric = DiceMetric(
-            include_background=False, reduction="mean_batch", get_not_nans=True
-        )
+        dice_metric = DiceMetric(include_background=True, reduction="mean")
 
         # Setup optimizer
         optimizer = optim.AdamW(
