@@ -128,6 +128,7 @@ class BaseDataset:
 
         img, seg = sample["image"], sample["label"]
         # Handle (H, W, D) or (C, H, W, D)
+
         if img.ndim == 3:
             z = img.shape[-1] // 2
             img_slice = img[..., z]
@@ -139,6 +140,10 @@ class BaseDataset:
         elif img.ndim == 2:
             img_slice = img
             seg_slice = seg
+        elif img.ndim == 5:  # (B, C, D, W, H)
+            z = img.shape[2] // 2
+            img_slice = img[0, 0, z, ...]
+            seg_slice = seg[0, 0, z, ...]
         else:
             raise ValueError(f"Unsupported image shape: {img.shape}")
 
@@ -149,9 +154,9 @@ class BaseDataset:
         if flip_axis is not None:
             if isinstance(flip_axis, int):
                 flip_axis = (flip_axis,)
-            print(f"Flipping along axes: {flip_axis}")
+            # print(f"Flipping along axes: {flip_axis}")
             for axis in flip_axis:
-                print(f"Flipping along axis {axis}")
+                # print(f"Flipping along axis {axis}")
                 img_slice = np.flip(img_slice, axis=axis)
                 seg_slice = np.flip(seg_slice, axis=axis)
 
@@ -160,10 +165,7 @@ class BaseDataset:
         ax1.axis("off")
 
         ax2.imshow(img_slice, cmap="gray")
-        overlay = np.zeros_like(seg_slice, dtype=np.float32)
-        mask = seg_slice > 0
-        overlay[mask] = seg_slice[mask]
-        masked_overlay = np.ma.masked_where(overlay == 0, overlay)
+        masked_overlay = np.ma.masked_where(seg_slice == 0, seg_slice)
 
         legend = self._get_organ_legend(seg_slice)
         legend_colors = ListedColormap([legend[label] for label in legend])
