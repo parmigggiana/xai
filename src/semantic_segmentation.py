@@ -693,7 +693,7 @@ class Medical3DSegmenter(nn.Module):
 
         # Setup loss function (memory-efficient configuration)
         loss_function = DiceCELoss(
-            include_background=False,
+            include_background=True,
             to_onehot_y=False,
             softmax=True,
             lambda_dice=0.65,
