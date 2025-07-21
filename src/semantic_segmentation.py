@@ -197,7 +197,6 @@ class Medical3DSegmenter(nn.Module):
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-5,
         save_best: bool = True,
-        gradient_accumulation_steps: int = 1,
         max_grad_norm: float = 1.0,
     ):
         """
@@ -208,7 +207,6 @@ class Medical3DSegmenter(nn.Module):
             learning_rate: Learning rate for optimizer
             weight_decay: Weight decay for regularization
             save_best: Whether to save the best model based on validation Dice score
-            gradient_accumulation_steps: Steps to accumulate gradients (effective batch size multiplier)
             max_grad_norm: Maximum gradient norm for clipping
 
         Returns:
@@ -230,7 +228,6 @@ class Medical3DSegmenter(nn.Module):
         print(f"   Device: {device}")
         print(f"   Learning Rate: {learning_rate}")
         print(f"   Weight Decay: {weight_decay}")
-        print(f"   Gradient Accumulation Steps: {gradient_accumulation_steps}")
 
         # Setup loss function, metrics, optimizer, and scaler
         loss_function, dice_metric, optimizer, scaler = self._setup_training_components(
@@ -263,7 +260,6 @@ class Medical3DSegmenter(nn.Module):
                     loss_function,
                     optimizer,
                     scaler,
-                    gradient_accumulation_steps,
                     max_grad_norm,
                     batch_idx,
                 )
@@ -388,7 +384,6 @@ class Medical3DSegmenter(nn.Module):
         loss_function,
         optimizer,
         scaler,
-        gradient_accumulation_steps,
         max_grad_norm,
         batch_idx,
     ):
@@ -414,31 +409,25 @@ class Medical3DSegmenter(nn.Module):
             with torch.amp.autocast(device.type):
                 outputs = self.forward(images)
                 loss = loss_function(outputs, labels)
-                loss = loss / gradient_accumulation_steps
 
             # Backward pass with gradient scaling
             if scaler is not None:
                 scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
+                scaler.step(optimizer)
+                scaler.update()
             else:
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
+                optimizer.step()
 
-            # Gradient accumulation step
-            if (batch_idx + 1) % gradient_accumulation_steps == 0:
-                if scaler is not None:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    torch.nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
-                    optimizer.step()
-
-                optimizer.zero_grad()
+            optimizer.zero_grad()
 
             # Clean up intermediate tensors
             del images, labels
 
-            return outputs, loss.item() * gradient_accumulation_steps, True
+            return outputs, loss.item(), True
         except torch.cuda.OutOfMemoryError:
             print(f"❌ OOM at batch {batch_idx}, clearing cache and continuing...")
             if torch.cuda.is_available():
@@ -468,14 +457,6 @@ class Medical3DSegmenter(nn.Module):
         self.eval()
         self.freeze()
 
-        # Use smaller batch size for evaluation if dealing with memory issues
-        original_batch_size = None
-        if batch_size_override and hasattr(self.dataset, "train_loader"):
-            original_batch_size = self.dataset.train_loader.batch_size
-            print(
-                f"Overriding batch size from {original_batch_size} to {batch_size_override} for evaluation"
-            )
-
         dice_metric = DiceMetric(include_background=False, reduction="mean")
         hausdorff_metric = HausdorffDistanceMetric(
             include_background=False, reduction="mean"
@@ -501,24 +482,28 @@ class Medical3DSegmenter(nn.Module):
             dice_metric.reset()
             hausdorff_metric.reset()
             has_labels = False
-
-            # Process batches with aggressive memory management
             with torch.no_grad():
 
-                for batch_idx, batch in enumerate(
-                    tqdm(loader, desc=f"Evaluating {split}")
-                ):
-                    # Move data to device with non_blocking for efficiency
+                for batch in tqdm(loader, desc=f"Evaluating {split}"):
                     images = batch["image"].to(device, non_blocking=True)
-                    labels = batch["label"].to(device, non_blocking=True)
+                    labels = batch.get("label", None)
+
+                    if labels is None:
+                        del images
+                        continue
+
+                    labels = labels.to(device, non_blocking=True)
 
                     # Ensure async transfers complete before proceeding
                     if device.type == "cuda":
                         torch.cuda.synchronize()
 
-                    if labels is None:
-                        del images
-                        continue
+                    # Ensure labels are in correct format [B, 1, D, H, W]
+                    if labels.dim() == 4:
+                        labels = labels.unsqueeze(1)
+
+                    if hasattr(self.dataset, "decode"):
+                        labels = self.dataset.decode(labels)
 
                     has_labels = True
 
@@ -546,37 +531,6 @@ class Medical3DSegmenter(nn.Module):
                     results[split] = {"dice": None, "hausdorff": None}
             else:
                 results[split] = {"dice": None, "hausdorff": None}
-        # Restore original batch size if it was overridden
-        if original_batch_size and hasattr(self.dataset, "train_loader"):
-            print(f"Restoring original batch size: {original_batch_size}")
 
         self.unfreeze()
         return results
-
-
-# Medical class descriptions for semantic guidance
-CHAOS_CLASS_DESCRIPTIONS = {
-    "CT": ["background tissue in CT scan", "liver organ in CT imaging"],
-    "MR": [
-        "background tissue in MRI scan",
-        "liver organ in MRI",
-        "right kidney in MRI",
-        "left kidney in MRI",
-        "spleen organ in MRI",
-    ],
-}
-
-MMWHS_CLASS_DESCRIPTIONS = {
-    "CT": [
-        "background tissue in cardiac CT",
-        "heart muscle myocardium",
-        "heart chambers and vessels",
-        "cardiac structures in CT",
-    ],
-    "MR": [
-        "background tissue in cardiac MRI",
-        "heart muscle myocardium",
-        "heart chambers and vessels",
-        "cardiac structures in MRI",
-    ],
-}
