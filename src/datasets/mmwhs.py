@@ -185,7 +185,7 @@ class MMWHS(BaseDataset):
             shuffle=True,
             batch_size=batch_size,
             num_workers=num_workers,
-            # collate_fn=lambda x: x[0] if len(x) == 1 else x,
+            pin_memory=True,
         )
 
         self.test_dataset = PyTorchMMWHS(
@@ -195,7 +195,7 @@ class MMWHS(BaseDataset):
             self.test_dataset,
             batch_size=batch_size,
             num_workers=num_workers,
-            # collate_fn=lambda x: x[0] if len(x) == 1 else x,
+            pin_memory=True,
         )
 
         if self.test_dataset[0]["label"] is None:

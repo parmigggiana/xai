@@ -184,6 +184,7 @@ class CHAOS(BaseDataset):
             shuffle=True,
             batch_size=batch_size,
             num_workers=num_workers,
+            pin_memory=True,
         )
 
         self.test_dataset = PyTorchCHAOS(
@@ -196,9 +197,12 @@ class CHAOS(BaseDataset):
         )
         self.test_loader = torch.utils.data.DataLoader(
             self.test_dataset,
+            shuffle=False,
             batch_size=batch_size,
             num_workers=num_workers,
+            pin_memory=True,
         )
+
         if self.test_dataset[0]["label"] is None:
             self.test_loader = None
 
