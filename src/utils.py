@@ -10,7 +10,6 @@ import numpy as np
 import psutil
 import torch
 import torch.nn
-from torch.utils.data import Dataset
 
 
 def assign_learning_rate(param_group, new_lr):
