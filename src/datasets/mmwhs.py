@@ -221,7 +221,7 @@ class MMWHS(BaseDataset):
         legend = {}
 
         set1 = cm.get_cmap("Set1", 8)
-        for i, label_val, organ_name in enumerate(mmwhs_labels):
+        for i, (label_val, organ_name) in enumerate(mmwhs_labels):
             if np.any(seg_slice == label_val):
                 legend[organ_name] = set1(i + 1)  # Skip the first color (background)
 
@@ -232,7 +232,7 @@ class MMWHS(BaseDataset):
         Encode the labels to their corresponding values.
         """
         encoded_labels = torch.zeros_like(labels, dtype=torch.int64)
-        for i, (label_val, organ_name) in enumerate(mmwhs_labels.items()):
+        for i, label_val in enumerate(mmwhs_labels.keys()):
             encoded_labels[labels == i] = label_val
         return encoded_labels
 
@@ -241,6 +241,6 @@ class MMWHS(BaseDataset):
         Decode the labels to their original values.
         """
         decoded_labels = torch.zeros_like(labels, dtype=torch.int64)
-        for i, label_val, organ_name in enumerate(mmwhs_labels.items()):
+        for i, label_val in enumerate(mmwhs_labels.keys()):
             decoded_labels[labels == label_val] = i
         return decoded_labels
