@@ -231,7 +231,7 @@ class MMWHS(BaseDataset):
         """
         Encode the labels to their corresponding values.
         """
-        encoded_labels = np.zeros_like(labels, dtype=np.int64)
+        encoded_labels = torch.zeros_like(labels, dtype=torch.int64)
         for i, (label_val, organ_name) in enumerate(mmwhs_labels.items()):
             encoded_labels[labels == i] = label_val
         return encoded_labels
@@ -240,7 +240,7 @@ class MMWHS(BaseDataset):
         """
         Decode the labels to their original values.
         """
-        decoded_labels = np.zeros_like(labels, dtype=np.int64)
+        decoded_labels = torch.zeros_like(labels, dtype=torch.int64)
         for i, label_val, organ_name in enumerate(mmwhs_labels.items()):
             decoded_labels[labels == label_val] = i
         return decoded_labels
