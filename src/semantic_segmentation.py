@@ -292,6 +292,10 @@ class Medical3DSegmenter(nn.Module):
                     images = batch["image"].to(device, non_blocking=True)
                     labels = batch["label"].to(device, non_blocking=True)
 
+                    # Ensure async transfers complete before proceeding
+                    if device.type == "cuda":
+                        torch.cuda.synchronize()
+
                     # Ensure labels are in correct format [B, 1, D, H, W]
                     if labels.dim() == 4:
                         labels = labels.unsqueeze(1)
@@ -506,13 +510,16 @@ class Medical3DSegmenter(nn.Module):
                 ):
                     # Move data to device with non_blocking for efficiency
                     images = batch["image"].to(device, non_blocking=True)
-                    labels = batch.get("label", None)
+                    labels = batch["label"].to(device, non_blocking=True)
+
+                    # Ensure async transfers complete before proceeding
+                    if device.type == "cuda":
+                        torch.cuda.synchronize()
 
                     if labels is None:
                         del images
                         continue
 
-                    labels = labels.to(device, non_blocking=True)
                     has_labels = True
 
                     # For very large images, process with reduced precision
