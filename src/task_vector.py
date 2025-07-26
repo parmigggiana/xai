@@ -44,7 +44,11 @@ class TaskVector:
                 if key not in other.vector:
                     print(f"Warning, key {key} is not present in both task vectors.")
                     continue
-                new_vector[key] = self.vector[key] + other.vector[key]
+                try:
+                    new_vector[key] = self.vector[key] + other.vector[key]
+                except Exception as e:
+                    print(f"Error adding key {key}: {e}")
+                    continue
         return TaskVector(vector=new_vector)
 
     def __radd__(self, other):
@@ -59,6 +63,55 @@ class TaskVector:
             for key in self.vector:
                 new_vector[key] = -self.vector[key]
         return TaskVector(vector=new_vector)
+
+    def __sub__(self, other):
+        """Subtract one task vector from another."""
+        with torch.no_grad():
+            new_vector = {}
+            for key in self.vector:
+                if key not in other.vector:
+                    print(f"Warning, key {key} is not present in both task vectors.")
+                    continue
+                try:
+                    new_vector[key] = self.vector[key] - other.vector[key]
+                except Exception as e:
+                    print(f"Error subtracting key {key}: {e}")
+                    continue
+        return TaskVector(vector=new_vector)
+
+    def __getitem__(self, key):
+        """Get an item from the task vector."""
+        return self.vector[key]
+
+    def keys(self):
+        """Get the keys of the task vector."""
+        return self.vector.keys()
+
+    def items(self):
+        """Get the items of the task vector."""
+        return self.vector.items()
+
+    def __len__(self):
+        """Get the length of the task vector."""
+        return len(self.vector)
+
+    def __contains__(self, key):
+        """Check if a key is in the task vector."""
+        return key in self.vector
+
+    def __delattr__(self, name):
+        """Delete an attribute from the task vector."""
+        if name in self.vector:
+            del self.vector[name]
+        else:
+            raise AttributeError(f"{name} not found in task vector.")
+
+    def __delitem__(self, key):
+        """Delete an item from the task vector using del operator."""
+        if key in self.vector:
+            del self.vector[key]
+        else:
+            raise KeyError(f"{key} not found in task vector.")
 
     def apply_to(self, pretrained_checkpoint, scaling_coef=1.0):
         """Apply a task vector to a pretrained model."""

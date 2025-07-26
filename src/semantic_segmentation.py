@@ -50,6 +50,8 @@ class Medical3DSegmenter(nn.Module):
             # Load pretrained SwinViT weights if available
             if pretrained:
                 self._load_swinvit_weights()
+
+            self.head = self.encoder.out
         else:
             raise ValueError(f"Unknown encoder type: {encoder_type}")
 
@@ -182,6 +184,15 @@ class Medical3DSegmenter(nn.Module):
         This allows the model to be used seamlessly in training loops.
         """
         return self.forward(x)
+
+    def freeze_head(self):
+        for param in self.head.parameters():
+            param.requires_grad = False
+
+    def freeze_body(self):
+        self.freeze()
+        for param in self.head.parameters():
+            param.requires_grad = True
 
     def freeze(self):
         for param in self.encoder.parameters():
