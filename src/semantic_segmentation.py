@@ -451,7 +451,7 @@ class Medical3DSegmenter(nn.Module):
     def load_task_vector(self, task_vector):
         """Load a task vector into the model."""
         with torch.no_grad():
-            for name, param in self.named_parameters():
+            for name, param in self.encoder.named_parameters():
                 if name in task_vector.vector:
                     param.data += task_vector.vector[name]
 
