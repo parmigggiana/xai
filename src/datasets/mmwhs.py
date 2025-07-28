@@ -166,16 +166,13 @@ class PyTorchMMWHS(VisionDataset):
                 else None
             )
 
-        if self.transform:
-            if label_tensor is not None:
-                label_tensor = self.transform(label_tensor)
-            if img_tensor is not None:
-                img_tensor = self.transform(img_tensor)
-
         data = {
             "image": img_tensor,
             "label": label_tensor,
         }
+
+        if self.transform:
+            data = self.transform(data)
 
         return data
 

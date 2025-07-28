@@ -501,7 +501,6 @@ class Medical3DSegmenter(nn.Module):
             hausdorff_metric.reset()
             has_labels = False
             with torch.no_grad():
-
                 for batch in tqdm(loader, desc=f"Evaluating {split}"):
                     images = batch["image"].to(device, non_blocking=True)
                     labels = batch.get("label", None)
@@ -515,10 +514,6 @@ class Medical3DSegmenter(nn.Module):
                     # Ensure async transfers complete before proceeding
                     if device.type == "cuda":
                         torch.cuda.synchronize()
-
-                    # Ensure labels are in correct format [B, 1, D, H, W]
-                    if labels.dim() == 4:
-                        labels = labels.unsqueeze(1)
 
                     if hasattr(self.dataset, "decode"):
                         labels = self.dataset.decode(labels)

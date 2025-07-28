@@ -166,16 +166,13 @@ class PyTorchCHAOS(VisionDataset):
         img_tensor = MetaTensor(img, meta=img_meta)
         seg_tensor = MetaTensor(seg, meta=seg_meta) if seg is not None else None
 
-        if self.transform:
-            if seg_tensor is not None:
-                seg_tensor = self.transform(seg_tensor)
-            if img_tensor is not None:
-                img_tensor = self.transform(img_tensor)
-
         sample = {
             "image": img_tensor,
             "label": seg_tensor,
         }
+
+        if self.transform:
+            sample = self.transform(sample)
 
         return sample
 
