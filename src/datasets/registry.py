@@ -23,7 +23,7 @@ class GenericDataset(object):
 
 
 def get_dataset(
-    dataset_name, base_path, preprocess=None, batch_size=128, num_workers=16, **kwargs
+    dataset_name, base_path, preprocess=None, batch_size=4, num_workers=0, **kwargs
 ) -> BaseDataset:
     assert (
         dataset_name in registry

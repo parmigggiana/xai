@@ -120,82 +120,45 @@ class PyTorchCHAOS(VisionDataset):
             patient_id = self.samples[idx]
             img_path, seg_path = self._get_paths(patient_id, self.domain)
 
-            img_files = sorted(img_path.glob("*.dcm"))
+            # Load entire DICOM series as volume using ITKReader
+            try:
+                # ITKReader can load entire DICOM series from directory
+                img_data = itk_reader.read(str(img_path))
+                img_array, img_meta = itk_reader.get_data(img_data)
+                img = img_array.astype(np.float32)
+            except Exception as e:
+                raise RuntimeError("Error loading DICOM series") from e
+
+            # Load PNG segmentation files using PILReader
             seg_files = sorted(seg_path.glob("*.png"))
+            print(
+                f"Split '{self.split}' - Found {len(seg_files)} segmentation files for patient {patient_id.name}"
+            )
+            if self.split == "train" and seg_files:
+                # Load all segmentation slices
+                seg_slices = []
+                seg_metas = []
+                for seg_file in seg_files:
+                    if seg_file.suffix == ".png":
+                        seg_data = pil_reader.read(str(seg_file))
+                        seg_array, seg_meta = pil_reader.get_data(seg_data)
+                        seg_slices.append(seg_array.astype(np.int64))
+                        seg_metas.append(seg_meta)
 
-            # Use ITKReader to load DICOM files
-            img_slices = []
-            img_metas = []
-            for img_file in img_files:
-                if img_file.suffix == ".dcm":
-                    img_data = itk_reader.read(str(img_file))
-                    img_array, img_meta = itk_reader.get_data(img_data)
-                    img_slices.append(img_array.astype(np.float32))
-                    img_metas.append(img_meta)
+                if self.liver_only and self.domain == "MR":
+                    # Filter out non-liver labels
+                    seg_slices = [
+                        np.where((seg >= 55) & (seg <= 70), seg, 0)
+                        for seg in seg_slices
+                    ]
 
-            # Use PILReader to load PNG segmentation files
-            seg_slices = []
-            seg_metas = []
-            for seg_file in seg_files:
-                if seg_file.suffix == ".png":
-                    seg_data = pil_reader.read(str(seg_file))
-                    seg_array, seg_meta = pil_reader.get_data(seg_data)
-                    seg_slices.append(seg_array.astype(np.int64))
-                    seg_metas.append(seg_meta)
-
-            if self.liver_only and self.domain == "MR":
-                # Filter out non-liver labels
-                seg_slices = [
-                    np.where((seg >= 55) & (seg <= 70), seg, 0) for seg in seg_slices
-                ]
-            img = np.stack(img_slices, axis=-1)
-            if self.split == "train":
                 seg = np.stack(seg_slices, axis=-1)
+                seg_meta = seg_metas[0] if seg_metas else {}
             else:
                 seg = None
-                seg_metas = [{}]
+                seg_meta = {}
 
-            # Use metadata from the first slice for the combined volume
-            img_meta = img_metas[0] if img_metas else {}
-            seg_meta = seg_metas[0] if seg_metas else {}
-
-            # Debug prints for metadata comparison
-            print(f"\n=== DEBUG: Metadata Analysis for Patient {patient_id.name} ===")
-            print(f"Total image slices: {len(img_metas)}")
-            print(f"Total seg slices: {len(seg_metas)}")
-
-            if img_metas:
-                print(f"\nFirst slice img metadata keys: {list(img_meta.keys())}")
-                # Check if metadata varies across slices
-                if len(img_metas) > 1:
-                    print("Checking if image metadata varies across slices:")
-                    for i, meta in enumerate(img_metas[1:], 1):
-                        for key in img_meta.keys():
-                            if key in meta and not np.array_equal(
-                                img_meta.get(key, None), meta.get(key, None)
-                            ):
-                                print(f"  Slice {i}: {key} differs from first slice")
-                                print(f"    First: {img_meta.get(key)}")
-                                print(f"    Slice {i}: {meta.get(key)}")
-
-            if seg_metas:
-                print(f"\nFirst slice seg metadata keys: {list(seg_meta.keys())}")
-                # Check if metadata varies across slices
-                if len(seg_metas) > 1:
-                    print("Checking if segmentation metadata varies across slices:")
-                    for i, meta in enumerate(seg_metas[1:], 1):
-                        for key in seg_meta.keys():
-                            if key in meta and not np.array_equal(
-                                seg_meta.get(key, None), meta.get(key, None)
-                            ):
-                                print(f"  Slice {i}: {key} differs from first slice")
-                                print(f"    First: {seg_meta.get(key)}")
-                                print(f"    Slice {i}: {meta.get(key)}")
-
-            print("=== END DEBUG ===\n")
-
-            # img and seg are (W, H, D)
-            # Ensure (C, D, H, W)
+            # img and seg are (W, H, D) - need to ensure (C, D, H, W)
             img = img.transpose(2, 0, 1)  # (W, H, D) -> (D, H, W)
             img = img[np.newaxis, ...]  # Add channel dimension
             if seg is not None:
@@ -206,13 +169,16 @@ class PyTorchCHAOS(VisionDataset):
         img_tensor = MetaTensor(img, meta=img_meta)
         seg_tensor = MetaTensor(seg, meta=seg_meta) if seg is not None else None
 
+        if self.transform:
+            if seg_tensor is not None:
+                seg_tensor = self.transform(seg_tensor)
+            if img_tensor is not None:
+                img_tensor = self.transform(img_tensor)
+
         sample = {
             "image": img_tensor,
             "label": seg_tensor,
         }
-
-        if self.transform:
-            sample = self.transform(sample)
 
         return sample
 

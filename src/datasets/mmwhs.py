@@ -150,10 +150,6 @@ class PyTorchMMWHS(VisionDataset):
                 else None
             )
 
-            data = {
-                "image": img_tensor,
-                "label": label_tensor,
-            }
         else:
             # Process 3D volume
             img_data = img_data.transpose(2, 0, 1)  # (W, H, D) -> (D, H, W)
@@ -161,15 +157,6 @@ class PyTorchMMWHS(VisionDataset):
             if label_data is not None:
                 label_data = label_data.transpose(2, 0, 1)
                 label_data = label_data[np.newaxis, ...]
-
-            # Debug prints for metadata (similar to CHAOS)
-            print(
-                f"\n=== DEBUG: MMWHS Metadata Analysis for {sample['image_path'].name} ==="
-            )
-            print(f"Image metadata keys: {list(img_meta.keys())}")
-            if label_data is not None:
-                print(f"Label metadata keys: {list(label_meta.keys())}")
-            print("=== END DEBUG ===\n")
 
             # Create MetaTensors for 3D volumes
             img_tensor = MetaTensor(img_data, meta=img_meta)
@@ -179,13 +166,16 @@ class PyTorchMMWHS(VisionDataset):
                 else None
             )
 
-            data = {
-                "image": img_tensor,
-                "label": label_tensor,
-            }
-
         if self.transform:
-            data = self.transform(data)
+            if label_tensor is not None:
+                label_tensor = self.transform(label_tensor)
+            if img_tensor is not None:
+                img_tensor = self.transform(img_tensor)
+
+        data = {
+            "image": img_tensor,
+            "label": label_tensor,
+        }
 
         return data
 

@@ -128,9 +128,16 @@ class Medical3DSegmenter(nn.Module):
 
     def _pad_input_for_swin_unetr(self, x: torch.Tensor) -> Tuple[torch.Tensor, int]:
         """Pads the input tensor's depth to be divisible by 32 for SwinUNETR."""
-        original_shape = (x.shape[2], x.shape[3], x.shape[4])
+        # Unpack shape: expect x to be [B, C, D, H, W] or [D, H, W]
+        if x.dim() == 5 or x.dim() == 4:
+            # [B, C, D, H, W] or [C, D, H, W]
+            depth, height, width = x.shape[-3:]
+        elif x.dim() == 3:
+            # [D, H, W]
+            depth, height, width = x.shape
+        else:
+            raise ValueError(f"Unsupported input shape for padding: {x.shape}")
         if self.encoder_type == "swin_unetr":
-            depth, height, width = x.shape[2], x.shape[3], x.shape[4]
             pad_depth = (32 - depth % 32) if depth % 32 != 0 else 0
             pad_height = (32 - height % 32) if height % 32 != 0 else 0
             pad_width = (32 - width % 32) if width % 32 != 0 else 0
@@ -138,7 +145,7 @@ class Medical3DSegmenter(nn.Module):
             padding = (0, pad_width, 0, pad_height, 0, pad_depth)
             if pad_depth > 0 or pad_height > 0 or pad_width > 0:
                 x = F.pad(x, padding, "constant", 0)
-        return x, original_shape
+        return x, (depth, height, width)
 
     def _crop_output_to_original_size(
         self, result: torch.Tensor, original_shape: Tuple[int, int, int]
@@ -455,7 +462,7 @@ class Medical3DSegmenter(nn.Module):
                 if name in task_vector.vector:
                     param.data += task_vector.vector[name]
 
-    def evaluate(self, batch_size_override=None):
+    def evaluate(self):
         """
         Evaluate the model and return metrics on both train and test loaders.
         Memory-optimized version with aggressive memory management for large datasets like MMWHS.
