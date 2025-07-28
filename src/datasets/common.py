@@ -1,4 +1,11 @@
-import napari
+try:
+    import napari
+
+    NAPARI_AVAILABLE = True
+except ImportError:
+    NAPARI_AVAILABLE = False
+    napari = None
+
 import numpy as np
 import torch
 from matplotlib import cm
@@ -45,6 +52,13 @@ class BaseDataset:
         Args:
             sample (dict): contains 'image' and 'label'.
         """
+        if not NAPARI_AVAILABLE:
+            print("⚠️  napari is not available. Install napari to use 3D visualization:")
+            print("   pip install 'napari[pyqt6,optional]==0.6.2a1'")
+            print("   Falling back to 2D slice visualization...")
+            self.visualize_sample_slice(sample)
+            return
+
         self._visualize_3d(sample)
 
     @torch.no_grad()
@@ -63,6 +77,9 @@ class BaseDataset:
             device (torch.device, optional): computation device.
             dataset_name (str): name of the dataset for legend labeling.
         """
+        if not NAPARI_AVAILABLE:
+            print("⚠️  napari is not available for 3D visualization")
+            return
 
         img, seg = sample["image"], sample["label"]
         # print(img.shape)
