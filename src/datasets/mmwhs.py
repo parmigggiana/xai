@@ -152,11 +152,11 @@ class PyTorchMMWHS(VisionDataset):
 
         else:
             # Process 3D volume
-            img_data = img_data.transpose(2, 0, 1)  # (W, H, D) -> (D, H, W)
-            img_data = img_data[np.newaxis, ...]  # Add channel dimension
-            if label_data is not None:
-                label_data = label_data.transpose(2, 0, 1)
-                label_data = label_data[np.newaxis, ...]
+            # img_data = img_data.transpose(2, 0, 1)  # (W, H, D) -> (D, H, W)
+            # img_data = img_data[np.newaxis, ...]  # Add channel dimension
+            # if label_data is not None:
+            #     label_data = label_data.transpose(2, 0, 1)
+            #     label_data = label_data[np.newaxis, ...]
 
             # Create MetaTensors for 3D volumes
             img_tensor = MetaTensor(img_data, meta=img_meta)

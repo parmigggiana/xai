@@ -131,9 +131,6 @@ class PyTorchCHAOS(VisionDataset):
 
             # Load PNG segmentation files using PILReader
             seg_files = sorted(seg_path.glob("*.png"))
-            print(
-                f"Split '{self.split}' - Found {len(seg_files)} segmentation files for patient {patient_id.name}"
-            )
             if self.split == "train" and seg_files:
                 # Load all segmentation slices
                 seg_slices = []
@@ -159,11 +156,11 @@ class PyTorchCHAOS(VisionDataset):
                 seg_meta = {}
 
             # img and seg are (W, H, D) - need to ensure (C, D, H, W)
-            img = img.transpose(2, 0, 1)  # (W, H, D) -> (D, H, W)
-            img = img[np.newaxis, ...]  # Add channel dimension
-            if seg is not None:
-                seg = seg.transpose(2, 0, 1)
-                seg = seg[np.newaxis, ...]
+            # img = img.transpose(2, 0, 1)  # (W, H, D) -> (D, H, W)
+            # img = img[np.newaxis, ...]  # Add channel dimension
+            # if seg is not None:
+            #     seg = seg.transpose(2, 0, 1)
+            #     seg = seg[np.newaxis, ...]
 
         # Create MetaTensors with metadata
         img_tensor = MetaTensor(img, meta=img_meta)
