@@ -2,13 +2,13 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Tuple
 
 import numpy as np
-import pydicom
 import torch
 from matplotlib import cm
-from PIL import Image
 from torchvision.datasets.vision import VisionDataset
 
 from src.datasets.common import BaseDataset
+from monai.data import DataLoader
+from monai.data import ITKReader, PILReader, MetaTensor
 
 chaos_labels_mr = [
     "Background",
@@ -94,35 +94,55 @@ class PyTorchCHAOS(VisionDataset):
         return img_path, seg_path
 
     def __getitem__(self, idx: int) -> Tuple[Any, Any]:
+        itk_reader = ITKReader()
+        pil_reader = PILReader()
+
         if self.slice_2d:
             img_file, seg_file = self.samples[idx]
-            img = pydicom.dcmread(img_file).pixel_array.astype(np.float32)
-            seg = (
-                np.array(Image.open(seg_file)).astype(np.int64)
-                if self.split == "train"
-                else None
-            )
-            if self.liver_only and self.domain == "MR":
+            # Use ITKReader to load DICOM file
+            img_data = itk_reader.read(str(img_file))
+            img_array, img_meta = itk_reader.get_data(img_data)
+            img = img_array.astype(np.float32)
+
+            # Use PILReader to load PNG segmentation file
+            if self.split == "train":
+                seg_data = pil_reader.read(str(seg_file))
+                seg_array, seg_meta = pil_reader.get_data(seg_data)
+                seg = seg_array.astype(np.int64)
+            else:
+                seg = None
+                seg_meta = {}
+
+            if self.liver_only and self.domain == "MR" and seg is not None:
                 # Filter out non-liver labels
                 seg = np.where((seg >= 55) & (seg <= 70), seg, 0)
-            # print(img.shape)
         else:
             patient_id = self.samples[idx]
             img_path, seg_path = self._get_paths(patient_id, self.domain)
 
             img_files = sorted(img_path.glob("*.dcm"))
             seg_files = sorted(seg_path.glob("*.png"))
-            img_slices = [
-                pydicom.dcmread(img_file).pixel_array.astype(np.float32)
-                for img_file in img_files
-                if img_file.suffix == ".dcm"
-            ]
 
-            seg_slices = [
-                np.array(Image.open(seg_file)).astype(np.int64)
-                for seg_file in seg_files
-                if seg_file.suffix == ".png"
-            ]
+            # Use ITKReader to load DICOM files
+            img_slices = []
+            img_metas = []
+            for img_file in img_files:
+                if img_file.suffix == ".dcm":
+                    img_data = itk_reader.read(str(img_file))
+                    img_array, img_meta = itk_reader.get_data(img_data)
+                    img_slices.append(img_array.astype(np.float32))
+                    img_metas.append(img_meta)
+
+            # Use PILReader to load PNG segmentation files
+            seg_slices = []
+            seg_metas = []
+            for seg_file in seg_files:
+                if seg_file.suffix == ".png":
+                    seg_data = pil_reader.read(str(seg_file))
+                    seg_array, seg_meta = pil_reader.get_data(seg_data)
+                    seg_slices.append(seg_array.astype(np.int64))
+                    seg_metas.append(seg_meta)
+
             if self.liver_only and self.domain == "MR":
                 # Filter out non-liver labels
                 seg_slices = [
@@ -133,6 +153,47 @@ class PyTorchCHAOS(VisionDataset):
                 seg = np.stack(seg_slices, axis=-1)
             else:
                 seg = None
+                seg_metas = [{}]
+
+            # Use metadata from the first slice for the combined volume
+            img_meta = img_metas[0] if img_metas else {}
+            seg_meta = seg_metas[0] if seg_metas else {}
+
+            # Debug prints for metadata comparison
+            print(f"\n=== DEBUG: Metadata Analysis for Patient {patient_id.name} ===")
+            print(f"Total image slices: {len(img_metas)}")
+            print(f"Total seg slices: {len(seg_metas)}")
+
+            if img_metas:
+                print(f"\nFirst slice img metadata keys: {list(img_meta.keys())}")
+                # Check if metadata varies across slices
+                if len(img_metas) > 1:
+                    print("Checking if image metadata varies across slices:")
+                    for i, meta in enumerate(img_metas[1:], 1):
+                        for key in img_meta.keys():
+                            if key in meta and not np.array_equal(
+                                img_meta.get(key, None), meta.get(key, None)
+                            ):
+                                print(f"  Slice {i}: {key} differs from first slice")
+                                print(f"    First: {img_meta.get(key)}")
+                                print(f"    Slice {i}: {meta.get(key)}")
+
+            if seg_metas:
+                print(f"\nFirst slice seg metadata keys: {list(seg_meta.keys())}")
+                # Check if metadata varies across slices
+                if len(seg_metas) > 1:
+                    print("Checking if segmentation metadata varies across slices:")
+                    for i, meta in enumerate(seg_metas[1:], 1):
+                        for key in seg_meta.keys():
+                            if key in meta and not np.array_equal(
+                                seg_meta.get(key, None), meta.get(key, None)
+                            ):
+                                print(f"  Slice {i}: {key} differs from first slice")
+                                print(f"    First: {seg_meta.get(key)}")
+                                print(f"    Slice {i}: {meta.get(key)}")
+
+            print("=== END DEBUG ===\n")
+
             # img and seg are (W, H, D)
             # Ensure (C, D, H, W)
             img = img.transpose(2, 0, 1)  # (W, H, D) -> (D, H, W)
@@ -141,9 +202,13 @@ class PyTorchCHAOS(VisionDataset):
                 seg = seg.transpose(2, 0, 1)
                 seg = seg[np.newaxis, ...]
 
+        # Create MetaTensors with metadata
+        img_tensor = MetaTensor(img, meta=img_meta)
+        seg_tensor = MetaTensor(seg, meta=seg_meta) if seg is not None else None
+
         sample = {
-            "image": torch.from_numpy(img),
-            "label": torch.from_numpy(seg) if seg is not None else None,
+            "image": img_tensor,
+            "label": seg_tensor,
         }
 
         if self.transform:
@@ -179,7 +244,7 @@ class CHAOS(BaseDataset):
             preprocess,
             liver_only=liver_only,  # , download=True
         )
-        self.train_loader = torch.utils.data.DataLoader(
+        self.train_loader = DataLoader(
             self.train_dataset,
             shuffle=True,
             batch_size=batch_size,
@@ -195,7 +260,7 @@ class CHAOS(BaseDataset):
             preprocess,
             liver_only=liver_only,  # , download=True
         )
-        self.test_loader = torch.utils.data.DataLoader(
+        self.test_loader = DataLoader(
             self.test_dataset,
             shuffle=False,
             batch_size=batch_size,

@@ -1,13 +1,14 @@
 from pathlib import Path
 from typing import Any, Callable, Optional, Tuple
 
-import nibabel as nib
 import numpy as np
 import torch
 from matplotlib import cm
 from torchvision.datasets.vision import VisionDataset
 
 from src.datasets.common import BaseDataset
+from monai.data import DataLoader
+from monai.data import ITKReader, MetaTensor
 
 mmwhs_labels = {
     0: "Background",
@@ -87,8 +88,10 @@ class PyTorchMMWHS(VisionDataset):
             if self.slice_2d:
                 # For 2D slicing, we need to know the number of slices
                 try:
-                    img_header = nib.load(str(img_file)).header
-                    num_slices = img_header.get_data_shape()[2]  # Z dimension
+                    itk_reader = ITKReader()
+                    img_data = itk_reader.read(str(img_file))
+                    img_array, _ = itk_reader.get_data(img_data)
+                    num_slices = img_array.shape[2]  # Z dimension
                     for slice_n in range(num_slices):
                         samples.append(
                             {
@@ -111,50 +114,74 @@ class PyTorchMMWHS(VisionDataset):
         return samples
 
     def _load_image(self, img_file):
-        img_nii = nib.load(str(img_file))
-        return img_nii.get_fdata().astype(np.float32)
+        itk_reader = ITKReader()
+        img_data = itk_reader.read(str(img_file))
+        img_array, img_meta = itk_reader.get_data(img_data)
+        return img_array.astype(np.float32), img_meta
 
-    def _load_label(self, img_file):
-        label_file = img_file.parent / img_file.name.replace(
-            "_image.nii.gz", "_label.nii.gz"
-        )
-        if label_file.exists():
-            label_nii = nib.load(str(label_file))
-            return label_nii.get_fdata().astype(np.int64)
-        else:
-            raise FileNotFoundError(f"Label file {label_file} does not exist.")
+    def _load_label(self, label_file):
+        if label_file is None:
+            return None, {}
+        itk_reader = ITKReader()
+        label_data = itk_reader.read(str(label_file))
+        label_array, label_meta = itk_reader.get_data(label_data)
+        return label_array.astype(np.int64), label_meta
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> Tuple[Any, Any]:
         sample = self.samples[idx]
-        img_data = self._load_image(sample["image_path"])
-        label_data = (
-            self._load_label(sample["label_path"])
-            if sample["label_path"] is not None
-            else None
-        )
+        img_data, img_meta = self._load_image(sample["image_path"])
+        label_data, label_meta = self._load_label(sample["label_path"])
+
         if self.slice_2d:
+            # Extract 2D slice
+            img_slice = img_data[:, :, sample["slice_n"]]
+            label_slice = (
+                label_data[:, :, sample["slice_n"]] if label_data is not None else None
+            )
+
+            # Create MetaTensors for 2D slices
+            img_tensor = MetaTensor(img_slice, meta=img_meta)
+            label_tensor = (
+                MetaTensor(label_slice, meta=label_meta)
+                if label_slice is not None
+                else None
+            )
+
             data = {
-                "image": torch.from_numpy(img_data[:, :, sample["slice_n"]]),
-                "label": (
-                    torch.from_numpy(label_data[:, :, sample["slice_n"]])
-                    if label_data is not None
-                    else None
-                ),
+                "image": img_tensor,
+                "label": label_tensor,
             }
         else:
+            # Process 3D volume
             img_data = img_data.transpose(2, 0, 1)  # (W, H, D) -> (D, H, W)
             img_data = img_data[np.newaxis, ...]  # Add channel dimension
             if label_data is not None:
                 label_data = label_data.transpose(2, 0, 1)
                 label_data = label_data[np.newaxis, ...]
+
+            # Debug prints for metadata (similar to CHAOS)
+            print(
+                f"\n=== DEBUG: MMWHS Metadata Analysis for {sample['image_path'].name} ==="
+            )
+            print(f"Image metadata keys: {list(img_meta.keys())}")
+            if label_data is not None:
+                print(f"Label metadata keys: {list(label_meta.keys())}")
+            print("=== END DEBUG ===\n")
+
+            # Create MetaTensors for 3D volumes
+            img_tensor = MetaTensor(img_data, meta=img_meta)
+            label_tensor = (
+                MetaTensor(label_data, meta=label_meta)
+                if label_data is not None
+                else None
+            )
+
             data = {
-                "image": torch.from_numpy(img_data),
-                "label": (
-                    torch.from_numpy(label_data) if label_data is not None else None
-                ),
+                "image": img_tensor,
+                "label": label_tensor,
             }
 
         if self.transform:
@@ -180,7 +207,7 @@ class MMWHS(BaseDataset):
         self.train_dataset = PyTorchMMWHS(
             location, domain, "train", preprocess, slice_2d=slice_2d
         )
-        self.train_loader = torch.utils.data.DataLoader(
+        self.train_loader = DataLoader(
             self.train_dataset,
             shuffle=True,
             batch_size=batch_size,
@@ -191,7 +218,7 @@ class MMWHS(BaseDataset):
         self.test_dataset = PyTorchMMWHS(
             location, domain, "test", preprocess, slice_2d=slice_2d
         )
-        self.test_loader = torch.utils.data.DataLoader(
+        self.test_loader = DataLoader(
             self.test_dataset,
             batch_size=batch_size,
             num_workers=num_workers,

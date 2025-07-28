@@ -4,7 +4,7 @@ numpy
 pydicom
 PILlow
 matplotlib
-monai[einops,nibabel]>=1.5.0
+monai[einops,itk]>=1.5.0
 napari[pyqt6,optional]
 # transformers
 # git+https://github.com/bowang-lab/MedSAM2.git
