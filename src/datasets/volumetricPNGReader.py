@@ -5,13 +5,13 @@ This module provides a custom image reader that can load PNG image series
 as 3D volumes, similar to how DICOM series are handled by ITKReader.
 """
 
-import numpy as np
 from pathlib import Path
-from typing import Iterable, Union, Tuple, Dict, Sequence
-from PIL import Image
+from typing import Dict, Iterable, Sequence, Tuple, Union
 
+import numpy as np
 from monai.data.image_reader import ImageReader
 from monai.utils import ensure_tuple, optional_import
+from PIL import Image
 
 nib, _ = optional_import("nibabel")
 

@@ -4,11 +4,10 @@ from typing import Callable, Optional
 import numpy as np
 import torch
 from matplotlib import cm
-from src.datasets.custom_imageDataset import ImageDataset
+from monai.data import DataLoader, ITKReader
 
 from src.datasets.common import BaseDataset
-from monai.data import DataLoader
-from monai.data import ITKReader
+from src.datasets.custom_imageDataset import ImageDataset
 
 mmwhs_labels = {
     0: "Background",
