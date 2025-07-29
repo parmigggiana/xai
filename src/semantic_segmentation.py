@@ -303,8 +303,8 @@ class Medical3DSegmenter(nn.Module):
                 for batch in tqdm(
                     self.dataset.train_loader, desc="Calculating Train Dice"
                 ):
-                    images = batch["image"].to(device, non_blocking=True)
-                    labels = batch["label"].to(device, non_blocking=True)
+                    images = batch[0].to(device, non_blocking=True)
+                    labels = batch[1].to(device, non_blocking=True)
 
                     # Ensure async transfers complete before proceeding
                     if device.type == "cuda":
@@ -407,8 +407,8 @@ class Medical3DSegmenter(nn.Module):
     ):
         """Process a single training batch with error handling."""
         try:
-            images = batch["image"].to(device, non_blocking=True)
-            labels = batch["label"].to(device, non_blocking=True)
+            images = batch[0].to(device, non_blocking=True)
+            labels = batch[1].to(device, non_blocking=True)
 
             # Ensure labels are in correct format [B, 1, D, H, W]
             if labels.dim() == 4:  # [B, D, H, W]
@@ -502,8 +502,8 @@ class Medical3DSegmenter(nn.Module):
             has_labels = False
             with torch.no_grad():
                 for batch in tqdm(loader, desc=f"Evaluating {split}"):
-                    images = batch["image"].to(device, non_blocking=True)
-                    labels = batch.get("label", None)
+                    images = batch[0].to(device, non_blocking=True)
+                    labels = batch[1] if len(batch) > 1 else None
 
                     if labels is None:
                         del images

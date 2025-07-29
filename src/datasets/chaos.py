@@ -1,14 +1,17 @@
+from email.mime import image
 from pathlib import Path
 from typing import Any, Callable, Optional, Tuple
 
 import numpy as np
 import torch
 from matplotlib import cm
-from torchvision.datasets.vision import VisionDataset
+from src.datasets.custom_imageDataset import ImageDataset
 
 from src.datasets.common import BaseDataset
 from monai.data import DataLoader
 from monai.data import ITKReader, PILReader, MetaTensor
+
+from src.datasets.volumetricPNGReader import VolumetricPNGReader
 
 chaos_labels_mr = [
     "Background",
@@ -24,15 +27,18 @@ chaos_labels_ct = [
 ]
 
 
-class PyTorchCHAOS(VisionDataset):
+class PyTorchCHAOS(ImageDataset):
     """
-    CHAOS Dataset for CT and MRI volumes.
+    CHAOS Dataset for CT and MRI volumes using MONAI's ImageDataset.
 
     Args:
         base_path (str): Root directory of the dataset.
         domain (str): Either 'CT' or 'MRI'.
         split (str): Either 'train' or 'test'.
-        transform (callable, optional): Transform to apply to the samples.
+        transform (callable, optional): Transform to apply to the images.
+        seg_transform (callable, optional): Transform to apply to the segmentations.
+        slice_2d (bool): If True, loads 2D slices; if False, loads 3D volumes.
+        liver_only (bool): If True, filters to liver-only labels for MR.
     """
 
     def __init__(
@@ -42,6 +48,7 @@ class PyTorchCHAOS(VisionDataset):
         slice_2d: bool = False,
         split: str = "train",
         transform: Optional[Callable] = None,
+        seg_transform: Optional[Callable] = None,
         liver_only: bool = False,
     ) -> None:
         domain = domain.upper()
@@ -52,7 +59,6 @@ class PyTorchCHAOS(VisionDataset):
         self.base_path = base_path
         self.domain = domain
         self.split = split
-        self.transform = transform
         self.slice_2d = slice_2d
         self.liver_only = liver_only
 
@@ -62,27 +68,48 @@ class PyTorchCHAOS(VisionDataset):
         self.data_path = (
             Path(self.base_path) / f"CHAOS_{split_dir}" / split_dir / domain_dir
         )
-        self.samples = self._load_samples()
 
-    def _load_samples(self):
-        samples = []
+        # Load samples and prepare file lists for ImageDataset
+        image_files, seg_files = self._load_file_lists()
+
+        print(f"Loaded {image_files} and {seg_files} for {self.domain} {self.split}")
+
+        # Initialize ImageDataset with file lists
+        super().__init__(
+            image_files=image_files,
+            seg_files=seg_files if self.split == "train" else None,
+            transform=transform,
+            seg_transform=seg_transform,
+            reader=ITKReader(),
+            seg_reader=VolumetricPNGReader(),
+            image_only=self.split != "train",  # Only load images for test set
+        )
+
+    def _load_file_lists(self):
+        """Load file lists for ImageDataset initialization."""
+        image_files = []
+        seg_files = []
+
         for patient_id in sorted(self.data_path.iterdir()):
             if not patient_id.is_dir():
                 continue
+
+            img_path, seg_path = self._get_paths(patient_id, self.domain)
             if self.slice_2d:
-                img_path, seg_path = self._get_paths(patient_id, self.domain)
-                img_files = sorted(img_path.glob("*.dcm"))
-                seg_files = sorted(seg_path.glob("*.png"))
-                for img_file, seg_file in zip(img_files, seg_files):
+                img_file_list = sorted(img_path.glob("*.dcm"))
+                seg_file_list = sorted(seg_path.glob("*.png"))
+
+                for img_file, seg_file in zip(img_file_list, seg_file_list):
                     if img_file.suffix == ".dcm" and seg_file.suffix == ".png":
-                        samples.append((img_file, seg_file))
+                        image_files.append(str(img_file))
+                        if self.split == "train":
+                            seg_files.append(str(seg_file))
             else:
-                samples.append(patient_id)
+                image_files.append(str(img_path))
+                if self.split == "train":
+                    seg_files.append(str(seg_path))
 
-        return samples
-
-    def __len__(self) -> int:
-        return len(self.samples)
+        return image_files, seg_files
 
     def _get_paths(self, patient_id: Path, domain: str) -> Tuple[Path, Path]:
         if domain == "CT":
@@ -93,89 +120,6 @@ class PyTorchCHAOS(VisionDataset):
             seg_path = patient_id / "T2SPIR" / "Ground"
         return img_path, seg_path
 
-    def __getitem__(self, idx: int) -> Tuple[Any, Any]:
-        itk_reader = ITKReader()
-        pil_reader = PILReader()
-
-        if self.slice_2d:
-            img_file, seg_file = self.samples[idx]
-            # Use ITKReader to load DICOM file
-            img_data = itk_reader.read(str(img_file))
-            img_array, img_meta = itk_reader.get_data(img_data)
-            img = img_array.astype(np.float32)
-
-            # Use PILReader to load PNG segmentation file
-            if self.split == "train":
-                seg_data = pil_reader.read(str(seg_file))
-                seg_array, seg_meta = pil_reader.get_data(seg_data)
-                seg = seg_array.astype(np.int64)
-            else:
-                seg = None
-                seg_meta = {}
-
-            if self.liver_only and self.domain == "MR" and seg is not None:
-                # Filter out non-liver labels
-                seg = np.where((seg >= 55) & (seg <= 70), seg, 0)
-        else:
-            patient_id = self.samples[idx]
-            img_path, seg_path = self._get_paths(patient_id, self.domain)
-
-            # Load entire DICOM series as volume using ITKReader
-            try:
-                # ITKReader can load entire DICOM series from directory
-                img_data = itk_reader.read(str(img_path))
-                img_array, img_meta = itk_reader.get_data(img_data)
-                img = img_array.astype(np.float32)
-            except Exception as e:
-                raise RuntimeError("Error loading DICOM series") from e
-
-            # Load PNG segmentation files using PILReader
-            seg_files = sorted(seg_path.glob("*.png"))
-            if self.split == "train" and seg_files:
-                # Load all segmentation slices
-                seg_slices = []
-                seg_metas = []
-                for seg_file in seg_files:
-                    if seg_file.suffix == ".png":
-                        seg_data = pil_reader.read(str(seg_file))
-                        seg_array, seg_meta = pil_reader.get_data(seg_data)
-                        seg_slices.append(seg_array.astype(np.int64))
-                        seg_metas.append(seg_meta)
-
-                if self.liver_only and self.domain == "MR":
-                    # Filter out non-liver labels
-                    seg_slices = [
-                        np.where((seg >= 55) & (seg <= 70), seg, 0)
-                        for seg in seg_slices
-                    ]
-
-                seg = np.stack(seg_slices, axis=-1)
-                seg_meta = seg_metas[0] if seg_metas else {}
-            else:
-                seg = None
-                seg_meta = {}
-
-            # img and seg are (W, H, D) - need to ensure (C, D, H, W)
-            # img = img.transpose(2, 0, 1)  # (W, H, D) -> (D, H, W)
-            # img = img[np.newaxis, ...]  # Add channel dimension
-            # if seg is not None:
-            #     seg = seg.transpose(2, 0, 1)
-            #     seg = seg[np.newaxis, ...]
-
-        # Create MetaTensors with metadata
-        img_tensor = MetaTensor(img, meta=img_meta)
-        seg_tensor = MetaTensor(seg, meta=seg_meta) if seg is not None else None
-
-        sample = {
-            "image": img_tensor,
-            "label": seg_tensor,
-        }
-
-        if self.transform:
-            sample = self.transform(sample)
-
-        return sample
-
 
 class CHAOS(BaseDataset):
     def __init__(
@@ -184,7 +128,8 @@ class CHAOS(BaseDataset):
         domain: str,
         slice_2d: bool = False,
         liver_only: bool = False,
-        preprocess=None,
+        transform=None,
+        seg_transform=None,
         batch_size=1,
         num_workers=0,
     ):
@@ -197,12 +142,13 @@ class CHAOS(BaseDataset):
         self.liver_only = liver_only
 
         self.train_dataset = PyTorchCHAOS(
-            location,
-            domain,
-            slice_2d,
-            "train",
-            preprocess,
-            liver_only=liver_only,  # , download=True
+            base_path=str(location),
+            domain=domain,
+            slice_2d=slice_2d,
+            split="train",
+            transform=transform,
+            seg_transform=seg_transform,
+            liver_only=liver_only,
         )
         self.train_loader = DataLoader(
             self.train_dataset,
@@ -213,12 +159,13 @@ class CHAOS(BaseDataset):
         )
 
         self.test_dataset = PyTorchCHAOS(
-            location,
-            domain,
-            slice_2d,
-            "test",
-            preprocess,
-            liver_only=liver_only,  # , download=True
+            base_path=str(location),
+            domain=domain,
+            slice_2d=slice_2d,
+            split="test",
+            transform=transform,
+            seg_transform=seg_transform,
+            liver_only=liver_only,
         )
         self.test_loader = DataLoader(
             self.test_dataset,
@@ -227,9 +174,6 @@ class CHAOS(BaseDataset):
             num_workers=num_workers,
             pin_memory=True,
         )
-
-        if self.test_dataset[0]["label"] is None:
-            self.test_loader = None
 
         if self.domain == "CT":
             self.num_classes = len(chaos_labels_ct)

@@ -1,14 +1,14 @@
 from pathlib import Path
-from typing import Any, Callable, Optional, Tuple
+from typing import Callable, Optional
 
 import numpy as np
 import torch
 from matplotlib import cm
-from torchvision.datasets.vision import VisionDataset
+from src.datasets.custom_imageDataset import ImageDataset
 
 from src.datasets.common import BaseDataset
 from monai.data import DataLoader
-from monai.data import ITKReader, MetaTensor
+from monai.data import ITKReader
 
 mmwhs_labels = {
     0: "Background",
@@ -22,15 +22,16 @@ mmwhs_labels = {
 }
 
 
-class PyTorchMMWHS(VisionDataset):
+class PyTorchMMWHS(ImageDataset):
     """
-    MM-WHS Dataset for CT and MRI volumes.
+    MM-WHS Dataset for CT and MRI volumes using MONAI's ImageDataset.
 
     Args:
         base_path (str): Root directory of the dataset.
-        domain (str): Either 'CT' or 'MRI'.
+        domain (str): Either 'CT' or 'MR'.
         split (str): Either 'train' or 'test'.
-        transform (callable, optional): Transform to apply to the samples.
+        transform (callable, optional): Transform to apply to the images.
+        seg_transform (callable, optional): Transform to apply to the segmentations.
         slice_2d (bool): If True, slices the 3D volumes into 2D slices. Defaults to False (3D).
     """
 
@@ -40,6 +41,7 @@ class PyTorchMMWHS(VisionDataset):
         domain: str,
         split: str = "train",
         transform: Optional[Callable] = None,
+        seg_transform: Optional[Callable] = None,
         slice_2d: bool = False,
     ) -> None:
         domain = domain.lower()
@@ -50,7 +52,6 @@ class PyTorchMMWHS(VisionDataset):
         self.base_path = base_path
         self.domain = domain
         self.split = split
-        self.transform = transform
         self.slice_2d = slice_2d
 
         self.data_path_images = (
@@ -69,10 +70,23 @@ class PyTorchMMWHS(VisionDataset):
                 / "nii"
             )
 
-        self.samples = self._load_samples()
+        # Load file lists for ImageDataset
+        image_files, seg_files = self._load_file_lists()
 
-    def _load_samples(self):
-        samples = []
+        # Initialize ImageDataset with file lists
+        super().__init__(
+            image_files=image_files,
+            seg_files=seg_files if self.split == "train" else None,
+            transform=transform,
+            seg_transform=seg_transform,
+            image_only=self.split != "train",  # Only load images for test set
+        )
+
+    def _load_file_lists(self):
+        """Load file lists for ImageDataset initialization."""
+        image_files = []
+        seg_files = []
+
         for img_file in sorted(self.data_path_images.glob("*_image.nii.gz")):
             if not str(img_file).endswith(".nii.gz"):
                 continue
@@ -93,88 +107,21 @@ class PyTorchMMWHS(VisionDataset):
                     img_array, _ = itk_reader.get_data(img_data)
                     num_slices = img_array.shape[2]  # Z dimension
                     for slice_n in range(num_slices):
-                        samples.append(
-                            {
-                                "image_path": img_file,
-                                "slice_n": slice_n,
-                                "label_path": label_file,
-                            }
-                        )
+                        # For 2D ImageDataset, we'll need custom handling
+                        # For now, add the 3D file and handle slicing in transforms
+                        image_files.append(str(img_file))
+                        if self.split == "train" and label_file:
+                            seg_files.append(str(label_file))
+                        break  # Add each volume only once for now
                 except Exception as e:
                     print(f"Error loading {img_file}: {e}")
                     continue
             else:
-                samples.append(
-                    {
-                        "image_path": img_file,
-                        "label_path": label_file,
-                    }
-                )
+                image_files.append(str(img_file))
+                if self.split == "train" and label_file:
+                    seg_files.append(str(label_file))
 
-        return samples
-
-    def _load_image(self, img_file):
-        itk_reader = ITKReader()
-        img_data = itk_reader.read(str(img_file))
-        img_array, img_meta = itk_reader.get_data(img_data)
-        return img_array.astype(np.float32), img_meta
-
-    def _load_label(self, label_file):
-        if label_file is None:
-            return None, {}
-        itk_reader = ITKReader()
-        label_data = itk_reader.read(str(label_file))
-        label_array, label_meta = itk_reader.get_data(label_data)
-        return label_array.astype(np.int64), label_meta
-
-    def __len__(self) -> int:
-        return len(self.samples)
-
-    def __getitem__(self, idx: int) -> Tuple[Any, Any]:
-        sample = self.samples[idx]
-        img_data, img_meta = self._load_image(sample["image_path"])
-        label_data, label_meta = self._load_label(sample["label_path"])
-
-        if self.slice_2d:
-            # Extract 2D slice
-            img_slice = img_data[:, :, sample["slice_n"]]
-            label_slice = (
-                label_data[:, :, sample["slice_n"]] if label_data is not None else None
-            )
-
-            # Create MetaTensors for 2D slices
-            img_tensor = MetaTensor(img_slice, meta=img_meta)
-            label_tensor = (
-                MetaTensor(label_slice, meta=label_meta)
-                if label_slice is not None
-                else None
-            )
-
-        else:
-            # Process 3D volume
-            # img_data = img_data.transpose(2, 0, 1)  # (W, H, D) -> (D, H, W)
-            # img_data = img_data[np.newaxis, ...]  # Add channel dimension
-            # if label_data is not None:
-            #     label_data = label_data.transpose(2, 0, 1)
-            #     label_data = label_data[np.newaxis, ...]
-
-            # Create MetaTensors for 3D volumes
-            img_tensor = MetaTensor(img_data, meta=img_meta)
-            label_tensor = (
-                MetaTensor(label_data, meta=label_meta)
-                if label_data is not None
-                else None
-            )
-
-        data = {
-            "image": img_tensor,
-            "label": label_tensor,
-        }
-
-        if self.transform:
-            data = self.transform(data)
-
-        return data
+        return image_files, seg_files
 
 
 class MMWHS(BaseDataset):
@@ -183,7 +130,8 @@ class MMWHS(BaseDataset):
         location,
         domain: str,
         slice_2d: bool = False,
-        preprocess=None,
+        transform=None,
+        seg_transform=None,
         batch_size=1,
         num_workers=0,
     ):
@@ -192,7 +140,12 @@ class MMWHS(BaseDataset):
         """
         super().__init__()
         self.train_dataset = PyTorchMMWHS(
-            location, domain, "train", preprocess, slice_2d=slice_2d
+            base_path=str(location),
+            domain=domain,
+            split="train",
+            transform=transform,
+            seg_transform=seg_transform,
+            slice_2d=slice_2d,
         )
         self.train_loader = DataLoader(
             self.train_dataset,
@@ -203,7 +156,12 @@ class MMWHS(BaseDataset):
         )
 
         self.test_dataset = PyTorchMMWHS(
-            location, domain, "test", preprocess, slice_2d=slice_2d
+            base_path=str(location),
+            domain=domain,
+            split="test",
+            transform=transform,
+            seg_transform=seg_transform,
+            slice_2d=slice_2d,
         )
         self.test_loader = DataLoader(
             self.test_dataset,
@@ -211,9 +169,6 @@ class MMWHS(BaseDataset):
             num_workers=num_workers,
             pin_memory=True,
         )
-
-        if self.test_dataset[0]["label"] is None:
-            self.test_loader = None
 
         self.domain = domain
         self.slice_2d = slice_2d

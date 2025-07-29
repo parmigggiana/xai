@@ -23,7 +23,13 @@ class GenericDataset(object):
 
 
 def get_dataset(
-    dataset_name, base_path, preprocess=None, batch_size=4, num_workers=0, **kwargs
+    dataset_name,
+    base_path,
+    transform=None,
+    seg_transform=None,
+    batch_size=4,
+    num_workers=0,
+    **kwargs,
 ) -> BaseDataset:
     assert (
         dataset_name in registry
@@ -33,7 +39,8 @@ def get_dataset(
         base_path = Path(base_path)
     location = base_path / dataset_name
     dataset = dataset_class(
-        preprocess=preprocess,
+        transform=transform,
+        seg_transform=seg_transform,
         location=location,
         batch_size=batch_size,
         num_workers=num_workers,
