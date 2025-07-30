@@ -78,7 +78,8 @@ class PyTorchMMWHS(ImageDataset):
             seg_files=seg_files if self.split == "train" else None,
             transform=transform,
             seg_transform=seg_transform,
-            image_only=self.split != "train",  # Only load images for test set
+            image_only=False,
+            transform_with_metadata=True,
         )
 
     def _load_file_lists(self):

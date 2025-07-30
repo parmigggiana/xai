@@ -178,9 +178,6 @@ class VolumetricPNGReader(ImageReader):
             "filename_or_obj": [str(p) for p in sorted_paths],
             "original_shape": volume.shape,
             "spatial_shape": volume.shape,
-            "format": "PNG_VOLUME",
-            "dtype": str(volume.dtype),
-            "num_slices": len(sorted_paths),
         }
 
         return volume, metadata

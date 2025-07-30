@@ -80,7 +80,8 @@ class PyTorchCHAOS(ImageDataset):
             seg_transform=seg_transform,
             reader=ITKReader(),
             seg_reader=VolumetricPNGReader(),
-            image_only=self.split != "train",  # Only load images for test set
+            image_only=False,
+            transform_with_metadata=True,
         )
 
     def _load_file_lists(self):

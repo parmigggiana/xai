@@ -118,6 +118,13 @@ class ImageDataset(Dataset, Randomizable):
             if self.seg_files is not None:
                 seg, seg_meta_data = self.seg_loader(self.seg_files[index])
 
+                # Copy relevant spatial metadata from image to segmentation
+                if meta_data and seg_meta_data:
+                    # Copy affine matrices and spatial information from image metadata
+                    for attribute in meta_data:
+                        if attribute not in seg_meta_data:
+                            seg_meta_data[attribute] = meta_data[attribute]
+
         # apply the transforms
         if self.transform is not None:
             if isinstance(self.transform, Randomizable):
