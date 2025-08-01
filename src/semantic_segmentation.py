@@ -521,8 +521,6 @@ class Medical3DSegmenter(nn.Module):
                         labels = self.dataset.decode(labels)
 
                     has_labels = True
-                    print(f"Image shape: {images.shape}")
-                    print(f"Label shape: {labels.shape}")
                     # For very large images, process with reduced precision
                     with torch.amp.autocast(device.type):
                         outputs = self(images)
