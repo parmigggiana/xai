@@ -5,7 +5,7 @@ from typing import Any, Callable, Optional, Tuple
 import numpy as np
 import torch
 from matplotlib import cm
-from monai.data import DataLoader, ITKReader, MetaTensor, PILReader
+from monai.data import DataLoader, ITKReader
 
 from src.datasets.common import BaseDataset
 from src.datasets.custom_imageDataset import ImageDataset
@@ -29,10 +29,14 @@ class PyTorchCHAOS(ImageDataset):
     """
     CHAOS Dataset for CT and MRI volumes using MONAI's ImageDataset.
 
+    This class scans both Train_Sets and Test_Sets directories but only keeps
+    samples that have corresponding labels (segmentation files). The actual
+    train/val/test splitting is handled by the parent CHAOS class.
+
     Args:
         base_path (str): Root directory of the dataset.
         domain (str): Either 'CT' or 'MRI'.
-        split (str): Either 'train' or 'test'.
+        indices (list, optional): List of indices to use for this dataset split.
         transform (callable, optional): Transform to apply to the images.
         seg_transform (callable, optional): Transform to apply to the segmentations.
         slice_2d (bool): If True, loads 2D slices; if False, loads 3D volumes.
@@ -44,36 +48,42 @@ class PyTorchCHAOS(ImageDataset):
         base_path: str,
         domain: str,
         slice_2d: bool = False,
-        split: str = "train",
+        indices: Optional[list] = None,
         transform: Optional[Callable] = None,
         seg_transform: Optional[Callable] = None,
         liver_only: bool = False,
     ) -> None:
         domain = domain.upper()
-        split = split.lower()
         assert domain in ["MRI", "MR", "CT"], "Domain must be 'MRI', 'MR', or 'CT'."
-        assert split in ["train", "test"], "Split must be 'train' or 'test'."
 
         self.base_path = base_path
         self.domain = domain
-        self.split = split
         self.slice_2d = slice_2d
         self.liver_only = liver_only
+        self.indices = indices
 
-        split_dir = "Test_Sets" if self.split == "test" else "Train_Sets"
         domain_dir = "CT" if self.domain == "CT" else "MR"
 
-        self.data_path = (
-            Path(self.base_path) / f"CHAOS_{split_dir}" / split_dir / domain_dir
+        # Scan both Train_Sets and Test_Sets directories
+        self.train_data_path = (
+            Path(self.base_path) / "CHAOS_Train_Sets" / "Train_Sets" / domain_dir
+        )
+        self.test_data_path = (
+            Path(self.base_path) / "CHAOS_Test_Sets" / "Test_Sets" / domain_dir
         )
 
-        # Load samples and prepare file lists for ImageDataset
-        image_files, seg_files = self._load_file_lists()
+        # Load all available samples with labels and prepare file lists for ImageDataset
+        image_files, seg_files = self._load_all_file_lists()
+
+        # If indices are provided, filter the files to only include those indices
+        if self.indices is not None:
+            image_files = [image_files[i] for i in self.indices]
+            seg_files = [seg_files[i] for i in self.indices]
 
         # Initialize ImageDataset with file lists
         super().__init__(
             image_files=image_files,
-            seg_files=seg_files if self.split == "train" else None,
+            seg_files=seg_files,
             transform=transform,
             seg_transform=seg_transform,
             reader=ITKReader(),
@@ -82,31 +92,54 @@ class PyTorchCHAOS(ImageDataset):
             transform_with_metadata=True,
         )
 
-    def _load_file_lists(self):
-        """Load file lists for ImageDataset initialization."""
+    def _load_all_file_lists(self):
+        """Load file lists from both Train_Sets and Test_Sets directories, keeping only samples with labels."""
         image_files = []
         seg_files = []
 
-        for patient_id in sorted(self.data_path.iterdir()):
-            if not patient_id.is_dir():
+        # Scan both train and test directories
+        for data_path in [self.train_data_path, self.test_data_path]:
+            if not data_path.exists():
                 continue
 
-            img_path, seg_path = self._get_paths(patient_id, self.domain)
-            if self.slice_2d:
-                img_file_list = sorted(img_path.glob("*.dcm"))
-                seg_file_list = sorted(seg_path.glob("*.png"))
+            for patient_id in sorted(data_path.iterdir()):
+                if not patient_id.is_dir():
+                    continue
 
-                for img_file, seg_file in zip(img_file_list, seg_file_list):
-                    if img_file.suffix == ".dcm" and seg_file.suffix == ".png":
-                        image_files.append(str(img_file))
-                        if self.split == "train":
-                            seg_files.append(str(seg_file))
-            else:
-                image_files.append(str(img_path))
-                if self.split == "train":
-                    seg_files.append(str(seg_path))
+                img_path, seg_path = self._get_paths(patient_id, self.domain)
+
+                # Check if both image and segmentation paths exist
+                if not img_path.exists() or not seg_path.exists():
+                    continue
+
+                if self.slice_2d:
+                    self._load_2d_slices(img_path, seg_path, image_files, seg_files)
+                else:
+                    self._load_3d_volume(img_path, seg_path, image_files, seg_files)
 
         return image_files, seg_files
+
+    def _load_2d_slices(self, img_path, seg_path, image_files, seg_files):
+        """Load 2D slices and only keep those with corresponding labels."""
+        img_file_list = sorted(img_path.glob("*.dcm"))
+        seg_file_list = sorted(seg_path.glob("*.png"))
+
+        for img_file, seg_file in zip(img_file_list, seg_file_list):
+            if (
+                img_file.suffix == ".dcm"
+                and seg_file.suffix == ".png"
+                and seg_file.exists()
+            ):
+                image_files.append(str(img_file))
+                seg_files.append(str(seg_file))
+
+    def _load_3d_volume(self, img_path, seg_path, image_files, seg_files):
+        """Load 3D volume only if segmentation directory has PNG files (indicating labels exist)."""
+        # Check if segmentation directory has any PNG files
+        seg_files_in_dir = list(seg_path.glob("*.png"))
+        if len(seg_files_in_dir) > 0:  # Only include if there are segmentation files
+            image_files.append(str(img_path))
+            seg_files.append(str(seg_path))
 
     def _get_paths(self, patient_id: Path, domain: str) -> Tuple[Path, Path]:
         if domain == "CT":
@@ -129,41 +162,120 @@ class CHAOS(BaseDataset):
         seg_transform=None,
         batch_size=1,
         num_workers=0,
+        train_ratio=0.7,
+        val_ratio=0.15,
+        test_ratio=0.15,
+        random_seed=42,
     ):
         """
-        CHAOS Test does not have labels, so we only use it for inference.
+        CHAOS Dataset with proper train/validation/test splitting.
+
+        Args:
+            location: Base path to the dataset
+            domain: Either 'CT' or 'MRI'
+            slice_2d: If True, loads 2D slices; if False, loads 3D volumes
+            liver_only: If True, filters to liver-only labels for MR
+            transform: Transform to apply to images
+            seg_transform: Transform to apply to segmentations
+            batch_size: Batch size for DataLoaders
+            num_workers: Number of workers for DataLoaders
+            train_ratio: Proportion of data for training (default: 0.7)
+            val_ratio: Proportion of data for validation (default: 0.15)
+            test_ratio: Proportion of data for testing (default: 0.15)
+            random_seed: Random seed for reproducible splits
         """
         super().__init__()
         self.domain = domain
         self.slice_2d = slice_2d
         self.liver_only = liver_only
 
-        self.train_dataset = PyTorchCHAOS(
+        # Validate split ratios
+        assert (
+            abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6
+        ), "Train, validation, and test ratios must sum to 1.0"
+
+        # Create a full dataset to get all available samples
+        full_dataset = PyTorchCHAOS(
             base_path=str(location),
             domain=domain,
             slice_2d=slice_2d,
-            split="train",
+            indices=None,  # Get all samples
             transform=transform,
             seg_transform=seg_transform,
             liver_only=liver_only,
         )
-        self.train_loader = DataLoader(
-            self.train_dataset,
-            shuffle=True,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            pin_memory=True,
+
+        # Get total number of samples
+        total_samples = len(full_dataset)
+
+        # Calculate split sizes
+        train_size = int(total_samples * train_ratio)
+        val_size = int(total_samples * val_ratio)
+        test_size = total_samples - train_size - val_size  # Remaining samples
+
+        print(f"Dataset {domain} total samples: {total_samples}")
+        print(f"Split sizes - Train: {train_size}, Val: {val_size}, Test: {test_size}")
+
+        # Create reproducible random indices
+        import random
+
+        random.seed(random_seed)
+        indices = list(range(total_samples))
+        random.shuffle(indices)
+
+        # Split indices
+        train_indices = indices[:train_size]
+        val_indices = indices[train_size : train_size + val_size]
+        test_indices = indices[train_size + val_size :]
+
+        # Create datasets for each split
+        self.train_dataset = PyTorchCHAOS(
+            base_path=str(location),
+            domain=domain,
+            slice_2d=slice_2d,
+            indices=train_indices,
+            transform=transform,
+            seg_transform=seg_transform,
+            liver_only=liver_only,
+        )
+
+        self.val_dataset = PyTorchCHAOS(
+            base_path=str(location),
+            domain=domain,
+            slice_2d=slice_2d,
+            indices=val_indices,
+            transform=transform,
+            seg_transform=seg_transform,
+            liver_only=liver_only,
         )
 
         self.test_dataset = PyTorchCHAOS(
             base_path=str(location),
             domain=domain,
             slice_2d=slice_2d,
-            split="test",
+            indices=test_indices,
             transform=transform,
             seg_transform=seg_transform,
             liver_only=liver_only,
         )
+
+        # Create DataLoaders
+        self.train_loader = DataLoader(
+            self.train_dataset,
+            # shuffle=True,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=True,
+        )
+
+        self.val_loader = DataLoader(
+            self.val_dataset,
+            shuffle=False,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=True,
+        )
+
         self.test_loader = DataLoader(
             self.test_dataset,
             shuffle=False,

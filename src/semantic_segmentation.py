@@ -253,9 +253,9 @@ class Medical3DSegmenter(nn.Module):
         )
 
         # Training history
-        history = {"train_loss": [], "train_dice": []}
+        history = {"val_loss": [], "val_dice": []}
 
-        best_train_dice = 0.0
+        best_val_dice = 0.0
         best_model_state = None
 
         for epoch in range(epochs):
@@ -295,13 +295,14 @@ class Medical3DSegmenter(nn.Module):
                         }
                     )
 
-            # Record epoch results
-            epoch_train_loss = np.mean(train_losses) if train_losses else float("inf")
-            epoch_train_dice = 0.0
-            # Compute training Dice score
+            # Validation phase
+            epoch_val_loss = 0.0
+            epoch_val_dice = 0.0
+
             with torch.no_grad():
+                self.eval()  # Set to eval mode for validation
                 for batch in tqdm(
-                    self.dataset.train_loader, desc="Calculating Train Dice"
+                    self.dataset.val_loader, desc="Calculating Val Loss & Dice"
                 ):
                     images = batch[0].to(device, non_blocking=True)
                     labels = batch[1].to(device, non_blocking=True)
@@ -321,34 +322,32 @@ class Medical3DSegmenter(nn.Module):
                     # Forward pass
                     with torch.amp.autocast(device.type):
                         outputs = self.forward(images)
-                    preds = torch.argmax(outputs, dim=1, keepdim=True)
+                        epoch_val_loss += loss_function(outputs, labels) / len(
+                            self.dataset.val_loader
+                        )
 
+                    preds = torch.argmax(outputs, dim=1, keepdim=True)
                     dice_metric(y_pred=preds, y=labels)
 
-            dice_result = dice_metric.aggregate()
+                # Aggregate validation metrics
+                dice_result = dice_metric.aggregate()
+                if isinstance(dice_result, tuple):
+                    epoch_val_dice = dice_result[0].mean().item()
+                elif hasattr(dice_result, "numel") and dice_result.numel() > 1:
+                    epoch_val_dice = dice_result.mean().item()
+                else:
+                    epoch_val_dice = float(dice_result)
+                dice_metric.reset()
 
-            # Check if dice_result is a tuple of multiple metrics
-            if isinstance(dice_result, tuple):
-                print("Multiple metrics returned, using first one for training Dice.")
-                print(f"Dice metrics: {dice_result}")
-                epoch_train_dice = dice_result[0].mean().item()
-            elif hasattr(dice_result, "numel") and dice_result.numel() > 1:
-                print("Dice result is a tensor with multiple elements, averaging them.")
-                print(f"Dice result: {dice_result}")
-                epoch_train_dice = dice_result.mean().item()
-            else:
-                epoch_train_dice = float(dice_result)
-            dice_metric.reset()
-
-            history["train_loss"].append(epoch_train_loss)
-            history["train_dice"].append(epoch_train_dice)
+            history["val_loss"].append(epoch_val_loss)
+            history["val_dice"].append(epoch_val_dice)
             print(
-                f"Epoch {epoch + 1} - Train Loss: {epoch_train_loss:.4f}, Train Dice: {epoch_train_dice:.4f}"
+                f"Epoch {epoch + 1} - Val Loss: {epoch_val_loss:.4f}, Val Dice: {epoch_val_dice:.4f}"
             )
 
-            # Save best model (move to CPU to save GPU memory)
-            if save_best and epoch_train_dice > best_train_dice:
-                best_train_dice = epoch_train_dice
+            # Save best model based on validation Dice (move to CPU to save GPU memory)
+            if save_best and epoch_val_dice > best_val_dice:
+                best_val_dice = epoch_val_dice
                 best_model_state = {
                     k: v.cpu().clone() for k, v in self.state_dict().items()
                 }
@@ -483,7 +482,7 @@ class Medical3DSegmenter(nn.Module):
         results = {}
         self.to(device)
 
-        for split in ["train"]:  # TODO reintroduce "test" split later
+        for split in ["train", "val", "test"]:  # TODO reintroduce "test" split later
             # Clear cache before each split
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -509,8 +508,6 @@ class Medical3DSegmenter(nn.Module):
                         del images
                         continue
 
-                    print(f"Labels: {labels}")
-                    print(f"Images: {images.shape}")
                     labels = labels.to(device, non_blocking=True)
 
                     # Ensure async transfers complete before proceeding

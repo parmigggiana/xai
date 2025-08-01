@@ -25,10 +25,14 @@ class PyTorchMMWHS(ImageDataset):
     """
     MM-WHS Dataset for CT and MRI volumes using MONAI's ImageDataset.
 
+    This class scans both train and test directories but only keeps
+    samples that have corresponding unencrypted labels (training files).
+    The actual train/val/test splitting is handled by the parent MMWHS class.
+
     Args:
         base_path (str): Root directory of the dataset.
         domain (str): Either 'CT' or 'MR'.
-        split (str): Either 'train' or 'test'.
+        indices (list, optional): List of indices to use for this dataset split.
         transform (callable, optional): Transform to apply to the images.
         seg_transform (callable, optional): Transform to apply to the segmentations.
         slice_2d (bool): If True, slices the 3D volumes into 2D slices. Defaults to False (3D).
@@ -38,90 +42,99 @@ class PyTorchMMWHS(ImageDataset):
         self,
         base_path: str,
         domain: str,
-        split: str = "train",
+        indices: Optional[list] = None,
         transform: Optional[Callable] = None,
         seg_transform: Optional[Callable] = None,
         slice_2d: bool = False,
     ) -> None:
         domain = domain.lower()
-        split = split.lower()
         assert domain in ["ct", "mr"], "Domain must be 'CT' or 'MR'."
-        assert split in ["train", "test"], "Split must be 'train' or 'test'."
 
         self.base_path = base_path
         self.domain = domain
-        self.split = split
         self.slice_2d = slice_2d
+        self.indices = indices
 
-        self.data_path_images = (
+        # Define paths for train and test directories
+        self.train_data_path = (
             Path(self.base_path)
             / "MM-WHS 2017 Dataset"
             / "MM-WHS 2017 Dataset"
-            / f"{self.domain}_{self.split}"
+            / f"{self.domain}_train"
         )
 
-        if self.split == "train":
-            self.data_path_labels = self.data_path_images
-        else:
-            self.data_path_labels = (
-                Path(self.base_path)
-                / "MMWHS_evaluation_testdata_label_encrypt_1mm_forpublic"
-                / "nii"
-            )
+        self.test_data_path = (
+            Path(self.base_path)
+            / "MMWHS"
+            / "MM-WHS 2017 Dataset"
+            / "MM-WHS 2017 Dataset"
+            / f"{self.domain}_test"
+        )
 
-        # Load file lists for ImageDataset
-        image_files, seg_files = self._load_file_lists()
+        # Load all available samples with unencrypted labels
+        image_files, seg_files = self._load_all_file_lists()
+
+        # If indices are provided, filter the files to only include those indices
+        if self.indices is not None:
+            image_files = [image_files[i] for i in self.indices]
+            seg_files = [seg_files[i] for i in self.indices]
 
         # Initialize ImageDataset with file lists
         super().__init__(
             image_files=image_files,
-            seg_files=seg_files if self.split == "train" else None,
+            seg_files=seg_files,
             transform=transform,
             seg_transform=seg_transform,
             image_only=False,
             transform_with_metadata=True,
         )
 
-    def _load_file_lists(self):
-        """Load file lists for ImageDataset initialization."""
+    def _load_all_file_lists(self):
+        """Load file lists from train directory only, since test labels are encrypted."""
         image_files = []
         seg_files = []
 
-        for img_file in sorted(self.data_path_images.glob("*_image.nii.gz")):
-            if not str(img_file).endswith(".nii.gz"):
-                continue
+        # Only scan the train directory as it has unencrypted labels
+        if self.train_data_path.exists():
+            for img_file in sorted(self.train_data_path.glob("*_image.nii.gz")):
+                if not str(img_file).endswith(".nii.gz"):
+                    continue
 
-            label_file = None
-            if self.split == "train":
+                # Look for corresponding label file
                 label_file = img_file.parent / img_file.name.replace(
                     "_image.nii.gz", "_label.nii.gz"
                 )
-                if not label_file.exists():
-                    raise FileNotFoundError(f"Label file {label_file} does not exist.")
 
-            if self.slice_2d:
-                # For 2D slicing, we need to know the number of slices
-                try:
-                    itk_reader = ITKReader()
-                    img_data = itk_reader.read(str(img_file))
-                    img_array, _ = itk_reader.get_data(img_data)
-                    num_slices = img_array.shape[2]  # Z dimension
-                    for slice_n in range(num_slices):
-                        # For 2D ImageDataset, we'll need custom handling
-                        # For now, add the 3D file and handle slicing in transforms
-                        image_files.append(str(img_file))
-                        if self.split == "train" and label_file:
-                            seg_files.append(str(label_file))
-                        break  # Add each volume only once for now
-                except Exception as e:
-                    print(f"Error loading {img_file}: {e}")
-                    continue
-            else:
-                image_files.append(str(img_file))
-                if self.split == "train" and label_file:
-                    seg_files.append(str(label_file))
+                if not label_file.exists():
+                    continue  # Skip if no label file
+
+                if self.slice_2d:
+                    self._load_2d_slices(img_file, label_file, image_files, seg_files)
+                else:
+                    self._load_3d_volume(img_file, label_file, image_files, seg_files)
 
         return image_files, seg_files
+
+    def _load_2d_slices(self, img_file, label_file, image_files, seg_files):
+        """Load 2D slices from a 3D volume."""
+        try:
+            itk_reader = ITKReader()
+            img_data = itk_reader.read(str(img_file))
+            img_array, _ = itk_reader.get_data(img_data)
+            num_slices = img_array.shape[2]  # Z dimension
+            for _ in range(num_slices):
+                # For 2D ImageDataset, we'll need custom handling
+                # For now, add the 3D file and handle slicing in transforms
+                image_files.append(str(img_file))
+                seg_files.append(str(label_file))
+                break  # Add each volume only once for now
+        except Exception as e:
+            print(f"Error loading {img_file}: {e}")
+
+    def _load_3d_volume(self, img_file, label_file, image_files, seg_files):
+        """Load 3D volume pair."""
+        image_files.append(str(img_file))
+        seg_files.append(str(label_file))
 
 
 class MMWHS(BaseDataset):
@@ -134,19 +147,98 @@ class MMWHS(BaseDataset):
         seg_transform=None,
         batch_size=1,
         num_workers=0,
+        train_ratio=0.7,
+        val_ratio=0.15,
+        test_ratio=0.15,
+        random_seed=42,
     ):
         """
-        MMWHS Test does not have labels, so we only use it for inference.
+        MMWHS Dataset with proper train/validation/test splitting.
+
+        Args:
+            location: Base path to the dataset
+            domain: Either 'CT' or 'MR'
+            slice_2d: If True, loads 2D slices; if False, loads 3D volumes
+            transform: Transform to apply to images
+            seg_transform: Transform to apply to segmentations
+            batch_size: Batch size for DataLoaders
+            num_workers: Number of workers for DataLoaders
+            train_ratio: Proportion of data for training (default: 0.7)
+            val_ratio: Proportion of data for validation (default: 0.15)
+            test_ratio: Proportion of data for testing (default: 0.15)
+            random_seed: Random seed for reproducible splits
         """
         super().__init__()
-        self.train_dataset = PyTorchMMWHS(
+        self.domain = domain
+        self.slice_2d = slice_2d
+
+        # Validate split ratios
+        assert (
+            abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6
+        ), "Train, validation, and test ratios must sum to 1.0"
+
+        # Create a full dataset to get all available samples
+        full_dataset = PyTorchMMWHS(
             base_path=str(location),
             domain=domain,
-            split="train",
+            indices=None,  # Get all samples
             transform=transform,
             seg_transform=seg_transform,
             slice_2d=slice_2d,
         )
+
+        # Get total number of samples
+        total_samples = len(full_dataset)
+
+        # Calculate split sizes
+        train_size = int(total_samples * train_ratio)
+        val_size = int(total_samples * val_ratio)
+        test_size = total_samples - train_size - val_size  # Remaining samples
+
+        print(f"Dataset {domain} total samples: {total_samples}")
+        print(f"Split sizes - Train: {train_size}, Val: {val_size}, Test: {test_size}")
+
+        # Create reproducible random indices
+        import random
+
+        random.seed(random_seed)
+        indices = list(range(total_samples))
+        random.shuffle(indices)
+
+        # Split indices
+        train_indices = indices[:train_size]
+        val_indices = indices[train_size : train_size + val_size]
+        test_indices = indices[train_size + val_size :]
+
+        # Create datasets for each split
+        self.train_dataset = PyTorchMMWHS(
+            base_path=str(location),
+            domain=domain,
+            indices=train_indices,
+            transform=transform,
+            seg_transform=seg_transform,
+            slice_2d=slice_2d,
+        )
+
+        self.val_dataset = PyTorchMMWHS(
+            base_path=str(location),
+            domain=domain,
+            indices=val_indices,
+            transform=transform,
+            seg_transform=seg_transform,
+            slice_2d=slice_2d,
+        )
+
+        self.test_dataset = PyTorchMMWHS(
+            base_path=str(location),
+            domain=domain,
+            indices=test_indices,
+            transform=transform,
+            seg_transform=seg_transform,
+            slice_2d=slice_2d,
+        )
+
+        # Create DataLoaders
         self.train_loader = DataLoader(
             self.train_dataset,
             shuffle=True,
@@ -155,23 +247,23 @@ class MMWHS(BaseDataset):
             pin_memory=True,
         )
 
-        self.test_dataset = PyTorchMMWHS(
-            base_path=str(location),
-            domain=domain,
-            split="test",
-            transform=transform,
-            seg_transform=seg_transform,
-            slice_2d=slice_2d,
-        )
-        self.test_loader = DataLoader(
-            self.test_dataset,
+        self.val_loader = DataLoader(
+            self.val_dataset,
+            shuffle=False,
             batch_size=batch_size,
             num_workers=num_workers,
             pin_memory=True,
         )
 
-        self.domain = domain
-        self.slice_2d = slice_2d
+        # For compatibility, create test_loader
+        self.test_loader = DataLoader(
+            self.test_dataset,
+            shuffle=False,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=True,
+        )
+
         self.num_classes = len(mmwhs_labels)
 
     def visualize_3d(self, sample):
