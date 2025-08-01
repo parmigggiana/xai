@@ -483,7 +483,7 @@ class Medical3DSegmenter(nn.Module):
         results = {}
         self.to(device)
 
-        for split in ["train", "test"]:
+        for split in ["train"]:  # TODO reintroduce "test" split later
             # Clear cache before each split
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -509,6 +509,8 @@ class Medical3DSegmenter(nn.Module):
                         del images
                         continue
 
+                    print(f"Labels: {labels}")
+                    print(f"Images: {images.shape}")
                     labels = labels.to(device, non_blocking=True)
 
                     # Ensure async transfers complete before proceeding
@@ -519,7 +521,8 @@ class Medical3DSegmenter(nn.Module):
                         labels = self.dataset.decode(labels)
 
                     has_labels = True
-
+                    print(f"Image shape: {images.shape}")
+                    print(f"Label shape: {labels.shape}")
                     # For very large images, process with reduced precision
                     with torch.amp.autocast(device.type):
                         outputs = self(images)

@@ -70,8 +70,6 @@ class PyTorchCHAOS(ImageDataset):
         # Load samples and prepare file lists for ImageDataset
         image_files, seg_files = self._load_file_lists()
 
-        print(f"Loaded {image_files} and {seg_files} for {self.domain} {self.split}")
-
         # Initialize ImageDataset with file lists
         super().__init__(
             image_files=image_files,
