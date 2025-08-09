@@ -3,7 +3,7 @@ numpy
 pydicom
 PILlow
 matplotlib
-monai[einops,itk]>=1.5.0
+monai[einops,itk,nibabel]>=1.5.0
 napari[pyqt6,optional]
 git+https://github.com/timojl/clipseg.git
 # transformers
