@@ -1,5 +1,7 @@
 import os
+from pathlib import Path
 from typing import OrderedDict, Tuple
+import zipfile
 
 import numpy as np
 import torch
@@ -58,9 +60,17 @@ class MedicalSegmenter(nn.Module):
             model = CLIPSeg(
                 classes=dataset.classnames, version="ViT-B/16", reduce_dim=64
             )
+            resource = "https://owncloud.gwdg.de/index.php/s/ioHbRzFx6th32hn/download"
+            dst = Path("./data/weights.zip")
+            if not Path("./data/clipseg_weights/rd64-uni-refined.pth").exists():
+                download_url(resource, dst)
+                with zipfile.ZipFile(dst, "r") as zip_ref:
+                    zip_ref.extractall("./data/")
+                dst.unlink(missing_ok=True)
+
             model.load_state_dict(
                 torch.load(
-                    "data/rd64-uni-refined.pth",
+                    "data/clipseg_weights/rd64-uni-refined.pth",
                     map_location=torch.device(
                         "cuda" if torch.cuda.is_available() else "cpu"
                     ),
