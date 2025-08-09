@@ -6,7 +6,7 @@ as 3D volumes, similar to how DICOM series are handled by ITKReader.
 """
 
 from pathlib import Path
-from typing import Dict, Iterable, Sequence, Tuple, Union
+from typing import Dict, Sequence, Tuple, Union
 
 import numpy as np
 from monai.data.image_reader import ImageReader
@@ -201,61 +201,3 @@ class VolumetricPNGReader(ImageReader):
                 f"No PNG files found in directory: {directory_path}"
             )
         return self._read_png_sequence(png_files)
-
-
-class VolumetricImageLoader:
-    """
-    Custom loader that can handle both DICOM directories and PNG volumes.
-
-    This class acts as a dispatcher, choosing the appropriate reader based on
-    the input data type and format.
-    """
-
-    def __init__(self):
-        from monai.data.image_reader import ITKReader
-
-        self.dicom_reader = ITKReader()
-        self.png_reader = VolumetricPNGReader()
-
-    def __call__(self, data: Union[str, Path]) -> Tuple[np.ndarray, Dict]:
-        """
-        Load image data using the appropriate reader.
-
-        Args:
-            data: path to file or directory, or special marker string
-
-        Returns:
-            Tuple[np.ndarray, Dict]: image array and metadata
-        """
-        if isinstance(data, str):
-            if data.startswith(PNG_VOLUME_PREFIX):
-                # Use PNG reader for CHAOS volumes
-                return self.png_reader.read(data)
-
-            data_path = Path(data)
-        else:
-            data_path = Path(data)
-
-        if data_path.is_dir():
-            # Check if directory contains DICOM or PNG files
-            dicom_files = list(data_path.glob("*.dcm")) + list(data_path.glob("*.DCM"))
-            png_files = list(data_path.glob("*.png")) + list(data_path.glob("*.PNG"))
-
-            if dicom_files:
-                # Use DICOM reader
-                return self.dicom_reader.read(str(data_path))
-            elif png_files:
-                # Use PNG reader
-                return self.png_reader.read(data_path)
-            else:
-                raise ValueError(
-                    f"No supported image files found in directory: {data_path}"
-                )
-
-        else:
-            # Single file - determine type by extension
-            if data_path.suffix.lower() in [".png"]:
-                return self.png_reader.read(data_path)
-            else:
-                # Assume DICOM or other ITK-supported format
-                return self.dicom_reader.read(str(data_path))

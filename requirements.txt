@@ -5,6 +5,7 @@ PILlow
 matplotlib
 monai[einops,itk]>=1.5.0
 napari[pyqt6,optional]
+git+https://github.com/timojl/clipseg.git
 # transformers
 # git+https://github.com/bowang-lab/MedSAM2.git
 # open-clip-torch

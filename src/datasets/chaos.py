@@ -1,15 +1,15 @@
-from email.mime import image
 from pathlib import Path
-from typing import Any, Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import numpy as np
 import torch
 from matplotlib import cm
-from monai.data import DataLoader, ITKReader
+from monai.data import DataLoader
 
+from src.ITKReader2D import ITKReader2D
 from src.datasets.common import BaseDataset
-from src.datasets.custom_imageDataset import ImageDataset
-from src.datasets.volumetricPNGReader import VolumetricPNGReader
+from src.ImageDataset import ImageDataset
+from src.volumetricPNGReader import VolumetricPNGReader
 
 chaos_labels_mr = [
     "Background",
@@ -86,7 +86,7 @@ class PyTorchCHAOS(ImageDataset):
             seg_files=seg_files,
             transform=transform,
             seg_transform=seg_transform,
-            reader=ITKReader(),
+            reader=ITKReader2D(),  # Use our fixed reader
             seg_reader=VolumetricPNGReader(),
             image_only=False,
             transform_with_metadata=True,
@@ -285,9 +285,10 @@ class CHAOS(BaseDataset):
         )
 
         if self.domain == "CT":
-            self.num_classes = len(chaos_labels_ct)
+            self.classnames = chaos_labels_ct
         else:
-            self.num_classes = len(chaos_labels_mr)
+            self.classnames = chaos_labels_mr
+        self.num_classes = len(self.classnames)
 
     def visualize_3d(self, sample):
         self._visualize_3d(

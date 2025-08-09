@@ -11,16 +11,17 @@ import torch
 from matplotlib import cm
 from matplotlib.colors import ListedColormap
 
-from src.semantic_segmentation import Medical3DSegmenter
+from src.semantic_segmentation import MedicalSegmenter
 
 
 class BaseDataset:
     def __init__(self):
         self.name = type(self).__name__
 
-    def _get_organ_legend(self, seg_slice):
+    @classmethod
+    def _get_organ_legend(cls, seg_slice):
 
-        print(f"Warning: No specific legend for dataset {type(self)}.")
+        print(f"Warning: No specific legend for dataset {type(cls)}.")
         set1 = cm.get_cmap("Set1", 8)  # Set1 is qualitative, 8 distinct colors
         legend = {}
         unique_labels = np.unique(seg_slice)
@@ -35,9 +36,9 @@ class BaseDataset:
             encoder_type (str): Type of encoder to use ('swin_unetr' or 'resnet')
 
         Returns:
-            Medical3DSegmenter: Model with semantic guidance capabilities
+            MedicalSegmenter: Model with semantic guidance capabilities
         """
-        model = Medical3DSegmenter(
+        model = MedicalSegmenter(
             encoder_type=encoder_type,
             num_classes=self.num_classes,
             pretrained=True,

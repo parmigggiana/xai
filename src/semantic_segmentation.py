@@ -8,21 +8,22 @@ import torch.nn.functional as F
 import torch.optim as optim
 from monai.apps import download_url
 from monai.losses import DiceCELoss
-from monai.metrics import DiceMetric
 from monai.networks.nets import SwinUNETR
 from tqdm import tqdm
+from src.CLIPSeg import CLIPSeg
+import gc
+from monai.metrics import DiceMetric, HausdorffDistanceMetric
 
 
-class Medical3DSegmenter(nn.Module):
+class MedicalSegmenter(nn.Module):
     """
-    3D Medical segmentation model with semantic guidance.
-    Uses medical pretrained encoders + semantic-guided heads.
+    Medical segmentation model with support for 3D and 2D inputs.
     """
 
     def __init__(
         self,
-        encoder_type: str = "swin_unetr",
-        num_classes: int = 2,
+        encoder_type: str,
+        num_classes: int,
         pretrained: bool = True,
         dataset=None,
     ):
@@ -52,8 +53,27 @@ class Medical3DSegmenter(nn.Module):
                 self._load_swinvit_weights()
 
             self.head = self.encoder.out
+        elif encoder_type == "clipseg":
+
+            model = CLIPSeg(
+                classes=dataset.classnames, version="ViT-B/16", reduce_dim=64
+            )
+            model.load_state_dict(
+                torch.load(
+                    "data/rd64-uni-refined.pth",
+                    map_location=torch.device(
+                        "cuda" if torch.cuda.is_available() else "cpu"
+                    ),
+                ),
+                strict=False,
+            )
+            self.encoder = model
+            self.head = model.head
+
         else:
-            raise ValueError(f"Unknown encoder type: {encoder_type}")
+            raise ValueError(
+                f"Unknown encoder type: {encoder_type}. Supported: 'swin_unetr', 'clipseg'."
+            )
 
     def to(self, device):
         """
@@ -137,14 +157,14 @@ class Medical3DSegmenter(nn.Module):
             depth, height, width = x.shape
         else:
             raise ValueError(f"Unsupported input shape for padding: {x.shape}")
-        if self.encoder_type == "swin_unetr":
-            pad_depth = (32 - depth % 32) if depth % 32 != 0 else 0
-            pad_height = (32 - height % 32) if height % 32 != 0 else 0
-            pad_width = (32 - width % 32) if width % 32 != 0 else 0
-            # F.pad uses (W_left, W_right, H_left, H_right, D_left, D_right)
-            padding = (0, pad_width, 0, pad_height, 0, pad_depth)
-            if pad_depth > 0 or pad_height > 0 or pad_width > 0:
-                x = F.pad(x, padding, "constant", 0)
+
+        pad_depth = (32 - depth % 32) if depth % 32 != 0 else 0
+        pad_height = (32 - height % 32) if height % 32 != 0 else 0
+        pad_width = (32 - width % 32) if width % 32 != 0 else 0
+        # F.pad uses (W_left, W_right, H_left, H_right, D_left, D_right)
+        padding = (0, pad_width, 0, pad_height, 0, pad_depth)
+        if pad_depth > 0 or pad_height > 0 or pad_width > 0:
+            x = F.pad(x, padding, "constant", 0)
         return x, (depth, height, width)
 
     def _crop_output_to_original_size(
@@ -174,11 +194,13 @@ class Medical3DSegmenter(nn.Module):
 
         # Preprocess input: resample to 256x256
         # x, original_size = self._preprocess_input(x)
-        x, original_shape = self._pad_input_for_swin_unetr(x)
+        if self.encoder_type == "swin_unetr":
+            x, original_shape = self._pad_input_for_swin_unetr(x)
 
         result = self.encoder(x)
 
-        result = self._crop_output_to_original_size(result, original_shape)
+        if self.encoder_type == "swin_unetr":
+            result = self._crop_output_to_original_size(result, original_shape)
 
         # Postprocess output: resample to original size
         # result = self._postprocess_output(result, original_size)
@@ -312,12 +334,12 @@ class Medical3DSegmenter(nn.Module):
                         torch.cuda.synchronize()
 
                     # Ensure labels are in correct format [B, 1, D, H, W]
-                    if labels.dim() == 4:
+                    if self.encoder_type == "swin_unetr" and labels.dim() == 4:
                         labels = labels.unsqueeze(1)
 
                     # If dataset has decode, apply it
-                    if hasattr(self.dataset, "decode"):
-                        labels = self.dataset.decode(labels)
+                    # if hasattr(self.dataset, "decode"):
+                    #     labels = self.dataset.decode(labels)
 
                     # Forward pass
                     with torch.amp.autocast(device.type):
@@ -366,11 +388,11 @@ class Medical3DSegmenter(nn.Module):
         """Setup loss function, metrics, optimizer, and scaler for training."""
 
         # Setup loss function (memory-efficient configuration)
-        # Custom class weights: reduce background weight (assume background is class 0)
+        # Custom class weights: reduce background weight (assume background is excluded, so we add 1)
         class_weights = torch.ones(
             self.num_classes, dtype=torch.float32, device=self.device
         )
-        class_weights[0] = 0.2  # Reduce background weight (adjust as needed)
+        # class_weights[0] = 0.2  # Reduce background weight (adjust as needed)
 
         loss_function = DiceCELoss(
             include_background=True,
@@ -410,17 +432,17 @@ class Medical3DSegmenter(nn.Module):
             labels = batch[1].to(device, non_blocking=True)
 
             # Ensure labels are in correct format [B, 1, D, H, W]
-            if labels.dim() == 4:  # [B, D, H, W]
+            if self.encoder_type == "swin_unetr" and labels.dim() == 4:  # [B, D, H, W]
                 labels = labels.unsqueeze(1)
 
             # Apply dataset-specific label decoding if available
-            if hasattr(self.dataset, "decode"):
-                labels = self.dataset.decode(labels)
+            # if hasattr(self.dataset, "decode"):
+            #     labels = self.dataset.decode(labels)
 
             # Validate label range
-            max_label = labels.max().item()
-            if max_label >= self.num_classes:
-                labels = torch.clamp(labels, 0, self.num_classes - 1)
+            # max_label = labels.max().item()
+            # if max_label >= self.num_classes:
+            #     labels = torch.clamp(labels, 0, self.num_classes - 1)
 
             # Forward pass with mixed precision
             with torch.amp.autocast(device.type):
@@ -466,9 +488,6 @@ class Medical3DSegmenter(nn.Module):
         Evaluate the model and return metrics on both train and test loaders.
         Memory-optimized version with aggressive memory management for large datasets like MMWHS.
         """
-        import gc
-
-        from monai.metrics import DiceMetric, HausdorffDistanceMetric
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.eval()
@@ -482,7 +501,7 @@ class Medical3DSegmenter(nn.Module):
         results = {}
         self.to(device)
 
-        for split in ["train", "val", "test"]:  # TODO reintroduce "test" split later
+        for split in ["train", "val", "test"]:
             # Clear cache before each split
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -514,8 +533,8 @@ class Medical3DSegmenter(nn.Module):
                     if device.type == "cuda":
                         torch.cuda.synchronize()
 
-                    if hasattr(self.dataset, "decode"):
-                        labels = self.dataset.decode(labels)
+                    # if hasattr(self.dataset, "decode"):
+                    #     labels = self.dataset.decode(labels)
 
                     has_labels = True
                     # For very large images, process with reduced precision

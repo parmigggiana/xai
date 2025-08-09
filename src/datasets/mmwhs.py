@@ -4,10 +4,12 @@ from typing import Callable, Optional
 import numpy as np
 import torch
 from matplotlib import cm
-from monai.data import DataLoader, ITKReader
+from monai.data import DataLoader, NibabelReader
 
+from src.ITKReader2D import ITKReader2D
+from src.NIFTIReader2D import NIFTIReader2D
 from src.datasets.common import BaseDataset
-from src.datasets.custom_imageDataset import ImageDataset
+from src.ImageDataset import ImageDataset
 
 mmwhs_labels = {
     0: "Background",
@@ -84,6 +86,7 @@ class PyTorchMMWHS(ImageDataset):
             image_files=image_files,
             seg_files=seg_files,
             transform=transform,
+            reader=NIFTIReader2D() if not slice_2d else NibabelReader(),
             seg_transform=seg_transform,
             image_only=False,
             transform_with_metadata=True,
@@ -109,32 +112,32 @@ class PyTorchMMWHS(ImageDataset):
                     continue  # Skip if no label file
 
                 if self.slice_2d:
-                    self._load_2d_slices(img_file, label_file, image_files, seg_files)
+                    slices = self._read_2d_slices(img_file, label_file)
+                    for slice_idx in range(slices):
+                        image_files.append((img_file, slice_idx))
+                        seg_files.append((label_file, slice_idx))
                 else:
-                    self._load_3d_volume(img_file, label_file, image_files, seg_files)
+                    image_files.append(img_file)
+                    seg_files.append(label_file)
 
         return image_files, seg_files
 
-    def _load_2d_slices(self, img_file, label_file, image_files, seg_files):
-        """Load 2D slices from a 3D volume."""
+    def _read_2d_slices(self, img_file, label_file):
+        """Load 2D slices from a 3D volume by extracting individual slices."""
         try:
-            itk_reader = ITKReader()
-            img_data = itk_reader.read(str(img_file))
-            img_array, _ = itk_reader.get_data(img_data)
-            num_slices = img_array.shape[2]  # Z dimension
-            for _ in range(num_slices):
-                # For 2D ImageDataset, we'll need custom handling
-                # For now, add the 3D file and handle slicing in transforms
-                image_files.append(str(img_file))
-                seg_files.append(str(label_file))
-                break  # Add each volume only once for now
+            reader = NibabelReader()
+            data = reader.read(img_file)
+            print(f"Loaded {img_file} of type {type(data)}")
+
+            slices = data.shape[2]
+
+            return slices
+
         except Exception as e:
             print(f"Error loading {img_file}: {e}")
+            import traceback
 
-    def _load_3d_volume(self, img_file, label_file, image_files, seg_files):
-        """Load 3D volume pair."""
-        image_files.append(str(img_file))
-        seg_files.append(str(label_file))
+            traceback.print_exc()
 
 
 class MMWHS(BaseDataset):
@@ -264,6 +267,7 @@ class MMWHS(BaseDataset):
             pin_memory=True,
         )
 
+        self.classnames = list(mmwhs_labels.values())
         self.num_classes = len(mmwhs_labels)
 
     def visualize_3d(self, sample):

@@ -1,3 +1,7 @@
+"""
+This file is based on ImageDataset from MONAI, modified to support different image and segmentation readers.
+"""
+
 # Copyright (c) MONAI Consortium
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -108,22 +112,42 @@ class ImageDataset(Dataset, Randomizable):
         self.randomize()
         meta_data, seg_meta_data, seg, label = None, None, None, None
 
+        # Handle slice tuples for 2D slice loading
+        image_file = self.image_files[index]
+        seg_file = self.seg_files[index] if self.seg_files is not None else None
+        
+        # Check if we have slice tuples (file_path, slice_index)
+        image_slice_idx = None
+        seg_slice_idx = None
+        
+        if isinstance(image_file, tuple) and len(image_file) == 2:
+            image_file, image_slice_idx = image_file
+            
+        if seg_file is not None and isinstance(seg_file, tuple) and len(seg_file) == 2:
+            seg_file, seg_slice_idx = seg_file
+
         # load data and optionally meta
         if self.image_only:
-            img = self.loader(self.image_files[index])
-            if self.seg_files is not None:
-                seg = self.seg_loader(self.seg_files[index])
+            img = self.loader(image_file)
+            if seg_file is not None:
+                seg = self.seg_loader(seg_file)
         else:
-            img, meta_data = self.loader(self.image_files[index])
-            if self.seg_files is not None:
-                seg, seg_meta_data = self.seg_loader(self.seg_files[index])
+            img, meta_data = self.loader(image_file)
+            if seg_file is not None:
+                seg, seg_meta_data = self.seg_loader(seg_file)
 
                 # Copy relevant spatial metadata from image to segmentation
                 if meta_data and seg_meta_data:
-                    # Copy affine matrices and spatial information from image metadata
                     for attribute in meta_data:
                         if attribute not in seg_meta_data:
                             seg_meta_data[attribute] = meta_data[attribute]
+
+        # Extract specific slice if slice index is provided
+        if image_slice_idx is not None and len(img.shape) >= 3:
+            img = img[..., image_slice_idx]  # Extract slice along last dimension
+                
+        if seg is not None and seg_slice_idx is not None and len(seg.shape) >= 3:
+            seg = seg[..., seg_slice_idx]  # Extract slice along last dimension
 
         # apply the transforms
         if self.transform is not None:
