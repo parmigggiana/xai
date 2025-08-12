@@ -1,13 +1,16 @@
+from typing import Dict, List, Optional, Union
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Union, Dict, Optional
 from clipseg.clipseg import CLIPDensePredT
 
 
 class CLIPSeg(nn.Module):
     """
     Wrapper for CLIPDensePredT that provides unified segmentation maps for multiple classes.
+
+    This wrapper allows overriding CLIPSeg's default prompt templates with medical-specific templates.
 
     Args:
         classes: List of class names to segment
@@ -19,6 +22,8 @@ class CLIPSeg(nn.Module):
             - 'weighted': Weighted average (requires class_weights)
         class_weights: Optional weights for each class (for weighted aggregation)
         background_class: Whether to include background class (index 0)
+        medical_templates: Optional dict mapping class names to template functions
+        dataset_info: Tuple of (dataset_name, domain) for automatic template selection
         **kwargs: Additional arguments for CLIPDensePredT
     """
 
@@ -29,6 +34,8 @@ class CLIPSeg(nn.Module):
         aggregation_mode: str = "argmax",
         class_weights: Optional[List[float]] = None,
         background_class: bool = True,
+        medical_templates: Optional[List] = None,
+        dataset_info: Optional[tuple] = None,
         **kwargs,
     ):
         super().__init__()
@@ -51,6 +58,11 @@ class CLIPSeg(nn.Module):
             self.background_class = background_class
 
         self.aggregation_mode = aggregation_mode
+
+        # Store medical templates for better prompt generation
+        self.medical_templates = medical_templates
+        self.dataset_info = dataset_info
+
         # Setup class weights - adjust for removed background if needed
         if class_weights is not None:
             if self.explicit_background and len(class_weights) == len(classes):
@@ -126,6 +138,78 @@ class CLIPSeg(nn.Module):
         ):
             self.head["upsample_proj"] = self.clipseg.upsample_proj
 
+    def generate_medical_prompts(self, class_name: str) -> List[str]:
+        """
+        Generate medical-specific prompts for a given class.
+
+        Uses the medical templates if provided, otherwise falls back to
+        automatic template selection based on dataset_info.
+        """
+        if self.medical_templates:
+            # Use provided medical templates
+            return [template(class_name) for template in self.medical_templates]
+
+        if self.dataset_info:
+            # Import templates from head.py
+            from src.datasets.templates import dataset_to_template
+
+            dataset_name, domain = self.dataset_info
+
+            if (dataset_name, domain) in dataset_to_template:
+                templates = dataset_to_template[(dataset_name, domain)]
+                return [template(class_name) for template in templates]
+
+        # Fallback to basic medical templates if nothing specific is available
+        fallback_templates = [
+            lambda c: f"medical image showing {c}.",
+            lambda c: f"medical scan of {c}.",
+            lambda c: f"anatomical structure {c}.",
+            lambda c: f"medical imaging of {c}.",
+            lambda c: f"radiological image showing {c}.",
+        ]
+        return [template(class_name) for template in fallback_templates]
+
+    def predict_single_class_with_medical_prompts(
+        self, image: torch.Tensor, class_name: str
+    ) -> torch.Tensor:
+        """
+        Get segmentation for a single class using medical-specific prompts.
+        """
+        if class_name not in self.classes:
+            raise ValueError(
+                f"Class '{class_name}' not in initialized classes: {self.classes}"
+            )
+
+        # Generate medical prompts for this class
+        medical_prompts = self.generate_medical_prompts(class_name)
+
+        # Compute embeddings for all medical prompts without tracking grads
+        embeddings = []
+        with torch.no_grad():
+            for prompt in medical_prompts:
+                # Use CLIPSeg's text encoding
+                emb = self.clipseg.compute_conditional(prompt)
+                if not isinstance(emb, torch.Tensor):
+                    emb = torch.tensor(emb).to(image.device)
+                if emb.dim() == 1:
+                    emb = emb.unsqueeze(0)
+                embeddings.append(emb)
+
+        # Average the embeddings from all templates (constant w.r.t. image)
+        avg_embedding = torch.stack(embeddings).mean(dim=0).to(image.device)
+
+        # Run the segmentation forward pass WITH gradients enabled
+        pred = self.clipseg(image, conditional=avg_embedding)[0]
+        pred = torch.sigmoid(pred)
+
+        # Resize if needed
+        if pred.shape[2:] != image.shape[2:]:
+            pred = F.interpolate(
+                pred, size=image.shape[2:], mode="bilinear", align_corners=False
+            )
+
+        return pred
+
     def forward(
         self,
         image: torch.Tensor,
@@ -148,14 +232,20 @@ class CLIPSeg(nn.Module):
         foreground_predictions = []
 
         for cls in self.classes:
-            pred = self.clipseg(image, cls)[0]  # (B, 1, H, W)
-            pred = torch.sigmoid(pred)  # Convert to probabilities
+            # Use medical prompts for better conditioning
+            if self.medical_templates or self.dataset_info:
+                # Use medical-specific prompts
+                pred = self.predict_single_class_with_medical_prompts(image, cls)
+            else:
+                # Fallback to original CLIPSeg behavior
+                pred = self.clipseg(image, cls)[0]  # (B, 1, H, W)
+                pred = torch.sigmoid(pred)  # Convert to probabilities
 
-            # Resize to original image size if needed
-            if pred.shape[2:] != (height, width):
-                pred = F.interpolate(
-                    pred, size=(height, width), mode="bilinear", align_corners=False
-                )
+                # Resize to original image size if needed
+                if pred.shape[2:] != (height, width):
+                    pred = F.interpolate(
+                        pred, size=(height, width), mode="bilinear", align_corners=False
+                    )
 
             class_predictions[cls] = pred
             foreground_predictions.append(pred)
@@ -260,6 +350,9 @@ class CLIPSeg(nn.Module):
             f"Params: {total_params:8,} | Trainable: {trainable_params:8,}"
         )
         print("=" * 50)
+
+    def parameters(self, recurse=True):
+        return self.clipseg.parameters(recurse=recurse)
 
 
 def create_chaos_ct_clipseg(**kwargs) -> CLIPSeg:

@@ -6,9 +6,9 @@ import torch
 from matplotlib import cm
 from monai.data import DataLoader
 
-from src.ITKReader2D import ITKReader2D
 from src.datasets.common import BaseDataset
 from src.ImageDataset import ImageDataset
+from src.ITKReader2D import ITKReader2D
 from src.volumetricPNGReader import VolumetricPNGReader
 
 chaos_labels_mr = [

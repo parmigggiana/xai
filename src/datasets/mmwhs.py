@@ -6,8 +6,6 @@ import torch
 from matplotlib import cm
 from monai.data import DataLoader, NibabelReader
 
-from src.ITKReader2D import ITKReader2D
-from src.NIFTIReader2D import NIFTIReader2D
 from src.datasets.common import BaseDataset
 from src.ImageDataset import ImageDataset
 
@@ -86,7 +84,7 @@ class PyTorchMMWHS(ImageDataset):
             image_files=image_files,
             seg_files=seg_files,
             transform=transform,
-            reader=NIFTIReader2D() if not slice_2d else NibabelReader(),
+            reader=NibabelReader(),
             seg_transform=seg_transform,
             image_only=False,
             transform_with_metadata=True,
@@ -127,7 +125,6 @@ class PyTorchMMWHS(ImageDataset):
         try:
             reader = NibabelReader()
             data = reader.read(img_file)
-            print(f"Loaded {img_file} of type {type(data)}")
 
             slices = data.shape[2]
 

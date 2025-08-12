@@ -1,7 +1,8 @@
+import gc
 import os
+import zipfile
 from pathlib import Path
 from typing import OrderedDict, Tuple
-import zipfile
 
 import numpy as np
 import torch
@@ -10,11 +11,11 @@ import torch.nn.functional as F
 import torch.optim as optim
 from monai.apps import download_url
 from monai.losses import DiceCELoss
+from monai.metrics import DiceMetric, HausdorffDistanceMetric
 from monai.networks.nets import SwinUNETR
 from tqdm import tqdm
+
 from src.CLIPSeg import CLIPSeg
-import gc
-from monai.metrics import DiceMetric, HausdorffDistanceMetric
 
 
 class MedicalSegmenter(nn.Module):
@@ -56,9 +57,19 @@ class MedicalSegmenter(nn.Module):
 
             self.head = self.encoder.out
         elif encoder_type == "clipseg":
+            # Extract dataset information for medical template selection
+            dataset_info = None
+            if dataset is not None:
+                dataset_name = getattr(dataset, "name", type(dataset).__name__)
+                domain = getattr(dataset, "domain", None)
+                if dataset_name and domain:
+                    dataset_info = (dataset_name, domain)
 
             model = CLIPSeg(
-                classes=dataset.classnames, version="ViT-B/16", reduce_dim=64
+                classes=dataset.classnames,
+                version="ViT-B/16",
+                reduce_dim=64,
+                dataset_info=dataset_info,  # Pass dataset info for medical templates
             )
             resource = "https://owncloud.gwdg.de/index.php/s/ioHbRzFx6th32hn/download"
             dst = Path("./data/weights.zip")
@@ -498,7 +509,6 @@ class MedicalSegmenter(nn.Module):
         Evaluate the model and return metrics on both train and test loaders.
         Memory-optimized version with aggressive memory management for large datasets like MMWHS.
         """
-
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.eval()
         self.freeze()

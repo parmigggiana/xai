@@ -19,11 +19,11 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 import numpy as np
+import torch
 from monai.config import DtypeLike
 from monai.data.image_reader import ImageReader
 from monai.transforms import LoadImage, Randomizable, apply_transform
 from monai.utils import MAX_SEED, get_seed
-from regex import F
 from torch.utils.data import Dataset
 
 
@@ -115,14 +115,14 @@ class ImageDataset(Dataset, Randomizable):
         # Handle slice tuples for 2D slice loading
         image_file = self.image_files[index]
         seg_file = self.seg_files[index] if self.seg_files is not None else None
-        
+
         # Check if we have slice tuples (file_path, slice_index)
         image_slice_idx = None
         seg_slice_idx = None
-        
+
         if isinstance(image_file, tuple) and len(image_file) == 2:
             image_file, image_slice_idx = image_file
-            
+
         if seg_file is not None and isinstance(seg_file, tuple) and len(seg_file) == 2:
             seg_file, seg_slice_idx = seg_file
 
@@ -142,12 +142,59 @@ class ImageDataset(Dataset, Randomizable):
                         if attribute not in seg_meta_data:
                             seg_meta_data[attribute] = meta_data[attribute]
 
+        # Helper to derive 2D affine from 3D affine for slice k (slice along last axis)
+        def build_2d_affine_from_3d(affine3d: np.ndarray, k: int) -> np.ndarray:
+            """Construct 2D affine from 3D affine for slice k (slice along last axis).
+            Ensures float64 dtype; returns identity if affine is missing or invalid.
+            """
+            I2 = np.array(
+                [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64
+            )
+            if not isinstance(affine3d, np.ndarray):
+                return I2
+            A = np.asarray(affine3d, dtype=np.float64)
+            if A.shape != (4, 4):
+                return I2
+            k = int(k)
+            B = np.array(
+                [
+                    [A[0, 0], A[0, 1], A[0, 3] + k * A[0, 2]],
+                    [A[1, 0], A[1, 1], A[1, 3] + k * A[1, 2]],
+                    [0.0, 0.0, 1.0],
+                ],
+                dtype=np.float64,
+            )
+            return B
+
         # Extract specific slice if slice index is provided
         if image_slice_idx is not None and len(img.shape) >= 3:
-            img = img[..., image_slice_idx]  # Extract slice along last dimension
-                
+            # Slice along last dim (H, W, D -> H, W)
+            img = img[..., image_slice_idx]
+            if isinstance(meta_data, dict):
+                aff = meta_data.get("affine", None)
+                if aff is None:
+                    aff = meta_data.get("original_affine", None)
+                if isinstance(aff, torch.Tensor):
+                    aff = aff.detach().cpu().numpy()
+                affine2d = build_2d_affine_from_3d(aff, image_slice_idx)
+                meta_data["affine"] = affine2d
+                meta_data["original_affine"] = affine2d
+                meta_data["spatial_shape"] = np.asarray(img.shape[-2:], dtype=np.int64)
+
         if seg is not None and seg_slice_idx is not None and len(seg.shape) >= 3:
-            seg = seg[..., seg_slice_idx]  # Extract slice along last dimension
+            seg = seg[..., seg_slice_idx]
+            if isinstance(seg_meta_data, dict):
+                aff = seg_meta_data.get("affine", None)
+                if aff is None:
+                    aff = seg_meta_data.get("original_affine", None)
+                if isinstance(aff, torch.Tensor):
+                    aff = aff.detach().cpu().numpy()
+                affine2d = build_2d_affine_from_3d(aff, seg_slice_idx)
+                seg_meta_data["affine"] = affine2d
+                seg_meta_data["original_affine"] = affine2d
+                seg_meta_data["spatial_shape"] = np.asarray(
+                    seg.shape[-2:], dtype=np.int64
+                )
 
         # apply the transforms
         if self.transform is not None:

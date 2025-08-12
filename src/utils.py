@@ -1,6 +1,7 @@
 import os
 import pickle
 import re
+import sys
 import urllib.parse
 import urllib.request
 import zipfile
@@ -119,20 +120,28 @@ def download_and_extract_dataset(dataset: str, base_path: str = "data/"):
                 zip_url = index_url + zip_file
                 print(f"Downloading {zip_url} to {zip_path}...")
 
-                def reporthook(
-                    block_num, block_size, total_size, zip_file=decoded_zip_file
-                ):
-                    downloaded = block_num * block_size
-                    percent = (
-                        min(100, downloaded * 100 / total_size) if total_size > 0 else 0
-                    )
-                    print(
-                        f"\rDownloading {zip_file}: {percent:.2f}% ({downloaded // (1024 * 1024)}MB/{total_size // (1024 * 1024)}MB)",
-                        end="",
-                    )
+                # Only use progress reporting when running interactively
+                if sys.stdout.isatty():
 
-                urllib.request.urlretrieve(zip_url, zip_path, reporthook)
-                print()  # Newline after download
+                    def reporthook(
+                        block_num, block_size, total_size, zip_file=decoded_zip_file
+                    ):
+                        downloaded = block_num * block_size
+                        percent = (
+                            min(100, downloaded * 100 / total_size)
+                            if total_size > 0
+                            else 0
+                        )
+                        print(
+                            f"\rDownloading {zip_file}: {percent:.2f}% ({downloaded // (1024 * 1024)}MB/{total_size // (1024 * 1024)}MB)",
+                            end="",
+                        )
+
+                    urllib.request.urlretrieve(zip_url, zip_path, reporthook)
+                    print()  # Newline after download
+                else:
+                    urllib.request.urlretrieve(zip_url, zip_path)
+                    print(f"Download completed: {decoded_zip_file}")
 
             print(f"Extracting {zip_path} to {extract_dir}...")
             with zipfile.ZipFile(zip_path, "r") as zip_ref:
