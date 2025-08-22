@@ -255,10 +255,10 @@ class MedicalSegmenter(nn.Module):
     def finetune(
     self,
     epochs: int = 5,
-    learning_rate: float = 1e-5, # changed from 1e-4 to 1e-5
+    learning_rate: float = 1e-4, 
     weight_decay: float = 1e-5,
     save_best: bool = True,
-    max_grad_norm: float = 1.0,
+    max_grad_norm: float = 5.0,  #previously 1.0
 ):
         if self.dataset is None:
             raise ValueError("Dataset must be provided to finetune the model")
@@ -408,6 +408,7 @@ class MedicalSegmenter(nn.Module):
         """Process a single training batch with error handling."""
         try:
             
+            optimizer.zero_grad()
             
             images = batch[0].to(device, non_blocking=True)
             labels = batch[1].to(device, non_blocking=True)
@@ -424,18 +425,18 @@ class MedicalSegmenter(nn.Module):
             # max_label = labels.max().item()
             # if max_label >= self.num_classes:
             #     labels = torch.clamp(labels, 0, self.num_classes - 1)
-            print(f"[DEBUG] Batch {batch_idx} - unique labels: {torch.unique(labels)}")
-
+            
             # Forward pass with mixed precision
             with torch.amp.autocast(device.type):
                 outputs = self.forward(images)
                 loss = loss_function(outputs, labels)
 
-            
-            print(f"[DEBUG] Outputs -> mean: {outputs.mean().item():.4f}, std: {outputs.std().item():.4f}, max: {outputs.max().item():.4f}, min: {outputs.min().item():.4f}")
+            # Debug ogni 10 batch
+            if batch_idx % 20 == 0:
+                print(f"[DEBUG] Batch {batch_idx} - Loss: {loss.item():.6f}")
+                print(f"[DEBUG] Unique labels: {torch.unique(labels)}")
+                print(f"[DEBUG] Outputs -> mean: {outputs.mean().item():.6f}, std: {outputs.std().item():.6f}")
 
-            #Zero gradients AFTER forward pass
-            optimizer.zero_grad()
 
 
             # Backward pass with gradient scaling
@@ -443,6 +444,20 @@ class MedicalSegmenter(nn.Module):
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
+
+                # ✅ AGGIUNTO: Debug dei gradienti
+                total_norm = 0
+                param_count = 0
+                for p in self.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_norm += param_norm.item() ** 2
+                        param_count += 1
+                total_norm = total_norm ** (1. / 2)
+                
+                if batch_idx % 20 == 0:
+                    print(f"[DEBUG] Gradient norm: {total_norm:.8f} (params with grad: {param_count})")
+
 
                 scaler.step(optimizer)
                 scaler.update()
