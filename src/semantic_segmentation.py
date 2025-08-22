@@ -255,7 +255,7 @@ class MedicalSegmenter(nn.Module):
     def finetune(
     self,
     epochs: int = 5,
-    learning_rate: float = 1e-4,
+    learning_rate: float = 1e-5, # changed from 1e-4 to 1e-5
     weight_decay: float = 1e-5,
     save_best: bool = True,
     max_grad_norm: float = 1.0,
@@ -407,8 +407,7 @@ class MedicalSegmenter(nn.Module):
     ):
         """Process a single training batch with error handling."""
         try:
-            # CRITICAL FIX: Zero gradients BEFORE forward pass
-            optimizer.zero_grad(set_to_none=True)
+            
             
             images = batch[0].to(device, non_blocking=True)
             labels = batch[1].to(device, non_blocking=True)
@@ -434,6 +433,9 @@ class MedicalSegmenter(nn.Module):
 
             
             print(f"[DEBUG] Outputs -> mean: {outputs.mean().item():.4f}, std: {outputs.std().item():.4f}, max: {outputs.max().item():.4f}, min: {outputs.min().item():.4f}")
+
+            #Zero gradients AFTER forward pass
+            optimizer.zero_grad()
 
 
             # Backward pass with gradient scaling
