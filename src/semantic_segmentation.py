@@ -311,12 +311,6 @@ class MedicalSegmenter(nn.Module):
                 history["train_loss"].append(epoch_train_loss)
                 print(f"Epoch {epoch+1} - Train Loss: {epoch_train_loss:.4f}")
 
-            # 🔧 Gradient check
-            print("Gradient check:")
-            for name, param in self.named_parameters():
-                if param.requires_grad:
-                    print(name, param.grad is None)
-
             self.eval()
             val_losses = []
             epoch_val_dice = 0.0
@@ -414,7 +408,7 @@ class MedicalSegmenter(nn.Module):
         """Process a single training batch with error handling."""
         try:
             # CRITICAL FIX: Zero gradients BEFORE forward pass
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             
             images = batch[0].to(device, non_blocking=True)
             labels = batch[1].to(device, non_blocking=True)
@@ -442,6 +436,15 @@ class MedicalSegmenter(nn.Module):
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
+
+                # Check gradients
+                for name, param in self.named_parameters():
+                    if param.requires_grad:
+                        if param.grad is None:
+                            print(f"[NO GRAD] {name}")
+                        else:
+                            print(f"[GRAD OK] {name} | mean grad: {param.grad.abs().mean().item():.6f}")
+
                 scaler.step(optimizer)
                 scaler.update()
             else:
