@@ -425,25 +425,22 @@ class MedicalSegmenter(nn.Module):
             # max_label = labels.max().item()
             # if max_label >= self.num_classes:
             #     labels = torch.clamp(labels, 0, self.num_classes - 1)
+            print(f"[DEBUG] Batch {batch_idx} - unique labels: {torch.unique(labels)}")
 
             # Forward pass with mixed precision
             with torch.amp.autocast(device.type):
                 outputs = self.forward(images)
                 loss = loss_function(outputs, labels)
 
+            
+            print(f"[DEBUG] Outputs -> mean: {outputs.mean().item():.4f}, std: {outputs.std().item():.4f}, max: {outputs.max().item():.4f}, min: {outputs.min().item():.4f}")
+
+
             # Backward pass with gradient scaling
             if scaler is not None:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
-
-                # Check gradients
-                for name, param in self.named_parameters():
-                    if param.requires_grad:
-                        if param.grad is None:
-                            print(f"[NO GRAD] {name}")
-                        else:
-                            print(f"[GRAD OK] {name} | mean grad: {param.grad.abs().mean().item():.6f}")
 
                 scaler.step(optimizer)
                 scaler.update()
