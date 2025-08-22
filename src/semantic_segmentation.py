@@ -253,44 +253,29 @@ class MedicalSegmenter(nn.Module):
             param.requires_grad = True
 
     def finetune(
-        self,
-        epochs: int = 5,
-        learning_rate: float = 1e-4,
-        weight_decay: float = 1e-5,
-        save_best: bool = True,
-        max_grad_norm: float = 1.0,
-    ):
-        """
-        Memory-optimized finetune method with advanced training features.
-
-        Args:
-            epochs: Number of training epochs
-            learning_rate: Learning rate for optimizer
-            weight_decay: Weight decay for regularization
-            save_best: Whether to save the best model based on validation Dice score
-            max_grad_norm: Maximum gradient norm for clipping
-
-        Returns:
-            Dictionary with training history (losses, metrics)
-        """
+    self,
+    epochs: int = 5,
+    learning_rate: float = 1e-4,
+    weight_decay: float = 1e-5,
+    save_best: bool = True,
+    max_grad_norm: float = 1.0,
+):
         if self.dataset is None:
             raise ValueError("Dataset must be provided to finetune the model")
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.to(device)
-        torch.backends.cudnn.benchmark = True  # Optimize cudnn
+        torch.backends.cudnn.benchmark = True
 
         print(f"🚀 Starting training for {epochs} epochs")
         print(f"   Device: {device}")
         print(f"   Learning Rate: {learning_rate}")
         print(f"   Weight Decay: {weight_decay}")
 
-        # Setup loss, metrics, optimizer, scaler
         loss_function, dice_metric, optimizer, scaler = self._setup_training_components(
             learning_rate, weight_decay
         )
 
-        # Training history
         history = {"train_loss": [], "val_loss": [], "val_dice": []}
 
         best_val_dice = 0.0
@@ -301,7 +286,6 @@ class MedicalSegmenter(nn.Module):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            # ------------------- Training phase -------------------
             self.train()
             train_losses = []
 
@@ -322,13 +306,17 @@ class MedicalSegmenter(nn.Module):
                     avg_loss = np.mean(train_losses[-3:])
                     train_pbar.set_postfix({"Loss": f"{avg_loss:.4f}"})
 
-            # 🔧 save mean training loss of the epoch
             if train_losses:
                 epoch_train_loss = float(np.mean(train_losses))
                 history["train_loss"].append(epoch_train_loss)
                 print(f"Epoch {epoch+1} - Train Loss: {epoch_train_loss:.4f}")
 
-            # ------------------- Validation phase -------------------
+            # 🔧 Gradient check
+            print("Gradient check:")
+            for name, param in self.named_parameters():
+                if param.requires_grad:
+                    print(name, param.grad is None)
+
             self.eval()
             val_losses = []
             epoch_val_dice = 0.0
@@ -352,7 +340,6 @@ class MedicalSegmenter(nn.Module):
                     preds = torch.argmax(outputs, dim=1, keepdim=True)
                     dice_metric(y_pred=preds, y=labels)
 
-                # Aggregate validation metrics
                 epoch_val_loss = float(np.mean(val_losses)) if val_losses else 0.0
                 dice_result = dice_metric.aggregate()
                 if isinstance(dice_result, tuple):
@@ -369,7 +356,6 @@ class MedicalSegmenter(nn.Module):
                 f"Epoch {epoch+1} - Val Loss: {epoch_val_loss:.4f}, Val Dice: {epoch_val_dice:.4f}"
             )
 
-            # Save best model
             if save_best and epoch_val_dice > best_val_dice:
                 best_val_dice = epoch_val_dice
                 best_model_state = {k: v.cpu().clone() for k, v in self.state_dict().items()}
@@ -380,6 +366,7 @@ class MedicalSegmenter(nn.Module):
 
         print("\n✅ Training completed!")
         return history
+
 
 
     def _setup_training_components(self, learning_rate, weight_decay):
