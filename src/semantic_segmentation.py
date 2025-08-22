@@ -413,6 +413,9 @@ class MedicalSegmenter(nn.Module):
     ):
         """Process a single training batch with error handling."""
         try:
+            # CRITICAL FIX: Zero gradients BEFORE forward pass
+            optimizer.zero_grad()
+            
             images = batch[0].to(device, non_blocking=True)
             labels = batch[1].to(device, non_blocking=True)
 
@@ -445,8 +448,6 @@ class MedicalSegmenter(nn.Module):
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
                 optimizer.step()
-
-            optimizer.zero_grad()
 
             # Clean up intermediate tensors
             del images, labels
