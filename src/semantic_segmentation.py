@@ -275,46 +275,38 @@ class MedicalSegmenter(nn.Module):
         """
         if self.dataset is None:
             raise ValueError("Dataset must be provided to finetune the model")
+
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        # Move model to the correct device
         self.to(device)
-
-        # Enable memory-efficient settings
-        torch.backends.cudnn.benchmark = (
-            True  # Optimize cudnn for consistent input sizes
-        )
+        torch.backends.cudnn.benchmark = True  # Optimize cudnn
 
         print(f"🚀 Starting training for {epochs} epochs")
         print(f"   Device: {device}")
         print(f"   Learning Rate: {learning_rate}")
         print(f"   Weight Decay: {weight_decay}")
 
-        # Setup loss function, metrics, optimizer, and scaler
+        # Setup loss, metrics, optimizer, scaler
         loss_function, dice_metric, optimizer, scaler = self._setup_training_components(
             learning_rate, weight_decay
         )
 
         # Training history
-        history = {"val_loss": [], "val_dice": []}
+        history = {"train_loss": [], "val_loss": [], "val_dice": []}
 
         best_val_dice = 0.0
         best_model_state = None
 
         for epoch in range(epochs):
             print(f"\n📖 Epoch {epoch + 1}/{epochs}")
-
-            # Clear cache at start of each epoch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            # Training phase
+            # ------------------- Training phase -------------------
             self.train()
             train_losses = []
 
             train_pbar = tqdm(self.dataset.train_loader, desc="Training")
             for batch_idx, batch in enumerate(train_pbar):
-                # Process each training batch with error handling
                 outputs, loss_value, success = self._process_training_batch(
                     batch,
                     device,
@@ -327,52 +319,41 @@ class MedicalSegmenter(nn.Module):
 
                 if success:
                     train_losses.append(loss_value)
+                    avg_loss = np.mean(train_losses[-3:])
+                    train_pbar.set_postfix({"Loss": f"{avg_loss:.4f}"})
 
-                    # Update progress bar
-                    avg_loss = np.mean(
-                        train_losses[-3:]
-                    )  # Moving average of last 3 batches
-                    train_pbar.set_postfix(
-                        {
-                            "Loss": f"{avg_loss:.4f}",
-                        }
-                    )
+            # 🔧 save mean training loss of the epoch
+            if train_losses:
+                epoch_train_loss = float(np.mean(train_losses))
+                history["train_loss"].append(epoch_train_loss)
+                print(f"Epoch {epoch+1} - Train Loss: {epoch_train_loss:.4f}")
 
-            # Validation phase
-            epoch_val_loss = 0.0
+            # ------------------- Validation phase -------------------
+            self.eval()
+            val_losses = []
             epoch_val_dice = 0.0
 
             with torch.no_grad():
-                self.eval()  # Set to eval mode for validation
-                for batch in tqdm(
-                    self.dataset.val_loader, desc="Calculating Val Loss & Dice"
-                ):
+                for batch in tqdm(self.dataset.val_loader, desc="Validating"):
                     images = batch[0].to(device, non_blocking=True)
                     labels = batch[1].to(device, non_blocking=True)
 
-                    # Ensure async transfers complete before proceeding
                     if device.type == "cuda":
                         torch.cuda.synchronize()
 
-                    # Ensure labels are in correct format [B, 1, D, H, W]
                     if self.encoder_type == "swin_unetr" and labels.dim() == 4:
                         labels = labels.unsqueeze(1)
 
-                    # If dataset has decode, apply it
-                    # if hasattr(self.dataset, "decode"):
-                    #     labels = self.dataset.decode(labels)
-
-                    # Forward pass
                     with torch.amp.autocast(device.type):
                         outputs = self.forward(images)
-                        epoch_val_loss += loss_function(outputs, labels) / len(
-                            self.dataset.val_loader
-                        )
+                        loss_val = loss_function(outputs, labels)
+                        val_losses.append(loss_val.item())
 
                     preds = torch.argmax(outputs, dim=1, keepdim=True)
                     dice_metric(y_pred=preds, y=labels)
 
                 # Aggregate validation metrics
+                epoch_val_loss = float(np.mean(val_losses)) if val_losses else 0.0
                 dice_result = dice_metric.aggregate()
                 if isinstance(dice_result, tuple):
                     epoch_val_dice = dice_result[0].mean().item()
@@ -385,25 +366,21 @@ class MedicalSegmenter(nn.Module):
             history["val_loss"].append(epoch_val_loss)
             history["val_dice"].append(epoch_val_dice)
             print(
-                f"Epoch {epoch + 1} - Val Loss: {epoch_val_loss:.4f}, Val Dice: {epoch_val_dice:.4f}"
+                f"Epoch {epoch+1} - Val Loss: {epoch_val_loss:.4f}, Val Dice: {epoch_val_dice:.4f}"
             )
 
-            # Save best model based on validation Dice (move to CPU to save GPU memory)
+            # Save best model
             if save_best and epoch_val_dice > best_val_dice:
                 best_val_dice = epoch_val_dice
-                best_model_state = {
-                    k: v.cpu().clone() for k, v in self.state_dict().items()
-                }
+                best_model_state = {k: v.cpu().clone() for k, v in self.state_dict().items()}
 
-        # Restore best model if requested
         if save_best and best_model_state is not None:
-            # Move back to device
             best_model_state = {k: v.to(device) for k, v in best_model_state.items()}
             self.load_state_dict(best_model_state)
 
         print("\n✅ Training completed!")
-
         return history
+
 
     def _setup_training_components(self, learning_rate, weight_decay):
         """Setup loss function, metrics, optimizer, and scaler for training."""
