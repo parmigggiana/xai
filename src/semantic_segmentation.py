@@ -16,6 +16,11 @@ from monai.networks.nets import SwinUNETR
 from tqdm import tqdm
 
 from src.CLIPSeg import CLIPSeg
+from clipseg.clipseg import CLIPDensePredT
+from clip.model import CLIP
+
+
+
 
 
 class MedicalSegmenter(nn.Module):
@@ -68,10 +73,13 @@ class MedicalSegmenter(nn.Module):
             model = CLIPSeg(
                 classes=dataset.classnames,
                 version="ViT-B/16",
-                reduce_dim=64,
-                dataset_info=dataset_info,  # Pass dataset info for medical templates
+                reduce_dim=64,  # Rimuovi questo parametro
+                aggregation_mode="argmax",
+                background_class=True,
+                dataset_info=dataset_info,
             )
             
+            # Download and load weights
             resource = "https://owncloud.gwdg.de/index.php/s/ioHbRzFx6th32hn/download"
             dst = Path("./data/weights.zip")
             if not Path("./data/clipseg_weights/rd64-uni-refined.pth").exists():
@@ -81,15 +89,25 @@ class MedicalSegmenter(nn.Module):
                 dst.unlink(missing_ok=True)
 
             print("🔄 Loading CLIPSeg weights...")
-            model.load_state_dict(
-                torch.load(
+            from transformers import CLIPVisionModel, CLIPTextModel
+            
+            safe_globals = [
+                CLIPDensePredT, CLIP, CLIPVisionModel, CLIPTextModel,
+                torch.nn.Module, torch.nn.Conv2d, torch.nn.Linear, 
+                torch.nn.BatchNorm2d, torch.nn.LayerNorm, torch.nn.Dropout, 
+                torch.nn.ReLU, torch.nn.GELU
+            ]
+            
+            with torch.serialization.safe_globals(safe_globals=safe_globals):
+                state_dict = torch.load(
                     "data/clipseg_weights/rd64-uni-refined.pth",
-                    map_location=torch.device(
-                        "cuda" if torch.cuda.is_available() else "cpu"
-                    ),
-                ),
-                strict=False,
-            )
+                    map_location=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+                    weights_only=False,
+                )
+            
+                # Carica i pesi nel componente clipseg specifico
+                model.clipseg.load_state_dict(state_dict, strict=False)
+            
             self.encoder = model
             self.head = model.head
 

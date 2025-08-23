@@ -38,7 +38,7 @@ class BaseDataset:
         Returns:
             MedicalSegmenter or CLIPSeg: Model with semantic guidance capabilities
         """
-       
+        
         # Original logic for other encoder types
         model = MedicalSegmenter(
             encoder_type=encoder_type,
