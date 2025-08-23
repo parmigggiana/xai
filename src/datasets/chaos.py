@@ -301,8 +301,8 @@ class CHAOS(BaseDataset):
             ),
         )
 
-    def visualize_sample_slice(self, sample):
-        return self._visualize_sample_slice(sample, 0, flip_axis=1)
+    def visualize_sample_slice(self, sample, rotate=0, flip_axis=1):
+        return self._visualize_sample_slice(sample, rotate, flip_axis=flip_axis)
 
     def _get_organ_legend(self, seg_slice):
         legend = {}
