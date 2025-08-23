@@ -71,6 +71,7 @@ class MedicalSegmenter(nn.Module):
                 reduce_dim=64,
                 dataset_info=dataset_info,  # Pass dataset info for medical templates
             )
+            
             resource = "https://owncloud.gwdg.de/index.php/s/ioHbRzFx6th32hn/download"
             dst = Path("./data/weights.zip")
             if not Path("./data/clipseg_weights/rd64-uni-refined.pth").exists():
@@ -79,6 +80,7 @@ class MedicalSegmenter(nn.Module):
                     zip_ref.extractall("./data/")
                 dst.unlink(missing_ok=True)
 
+            print("🔄 Loading CLIPSeg weights...")
             model.load_state_dict(
                 torch.load(
                     "data/clipseg_weights/rd64-uni-refined.pth",
