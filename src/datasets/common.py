@@ -33,18 +33,86 @@ class BaseDataset:
     def get_model(self, encoder_type="swin_unetr"):
         """
         Args:
-            encoder_type (str): Type of encoder to use ('swin_unetr' or 'resnet')
+            encoder_type (str): Type of encoder to use ('swin_unetr', 'resnet', or 'clipseg')
 
         Returns:
-            MedicalSegmenter: Model with semantic guidance capabilities
+            MedicalSegmenter or CLIPSeg: Model with semantic guidance capabilities
         """
-        model = MedicalSegmenter(
-            encoder_type=encoder_type,
-            num_classes=self.num_classes,
-            pretrained=True,
-            dataset=self,
-        )
-        return model
+        if encoder_type == "clipseg":
+            # Import CLIPSeg wrapper from your custom implementation
+            from src.CLIPSeg import CLIPSeg
+            from pathlib import Path
+            
+            # Get dataset-specific classes and configuration
+            if hasattr(self, 'get_clipseg_classes'):
+                classes = self.get_clipseg_classes()
+            else:
+                # Fallback to generic classes based on dataset type
+                if hasattr(self, 'classes'):
+                    classes = self.classes
+                else:
+                    # Default classes for medical segmentation
+                    classes = ["organ", "tissue"]
+            
+            # Create CLIPSeg model
+            model = CLIPSeg(
+                classes=classes,
+                version="ViT-B/16",
+                aggregation_mode="argmax",
+                background_class=True,
+                dataset_info=(self.name, getattr(self, 'domain', 'unknown'))
+            )
+            
+            # Load pre-trained CLIPSeg weights if available
+            clipseg_weights_dir = Path("data/clipseg_weights")
+            best_weights = "rd64-uni-refined.pth"
+            weight_path = clipseg_weights_dir / best_weights
+            
+            if weight_path.exists():
+                try:
+                    print(f"Loading pre-trained CLIPSeg weights from: {weight_path}")
+                    
+                    # Safe loading with proper globals
+                    device = "cuda" if torch.cuda.is_available() else "cpu"
+                    
+                    # Import necessary classes for safe loading
+                    try:
+                        from clipseg import CLIPDensePredT
+                        from clip import CLIP
+                        from transformers import CLIPVisionModel, CLIPTextModel
+                        
+                        safe_globals = [
+                            CLIPDensePredT, CLIP, CLIPVisionModel, CLIPTextModel,
+                            torch.nn.Module, torch.nn.Conv2d, torch.nn.Linear, 
+                            torch.nn.BatchNorm2d, torch.nn.LayerNorm, torch.nn.Dropout, 
+                            torch.nn.ReLU, torch.nn.GELU
+                        ]
+                        
+                        with torch.serialization.safe_globals(safe_globals=safe_globals):
+                            state_dict = torch.load(weight_path, map_location=device, weights_only=False)
+                    except ImportError:
+                        # Fallback without safe_globals
+                        state_dict = torch.load(weight_path, map_location=device, weights_only=False)
+                    
+                    # Load state dict into the CLIPSeg model
+                    missing_keys, unexpected_keys = model.clipseg.load_state_dict(state_dict, strict=False)
+                    print(f"✅ Loaded CLIPSeg weights - Missing: {len(missing_keys)}, Unexpected: {len(unexpected_keys)}")
+                    
+                except Exception as e:
+                    print(f"⚠️ Could not load pre-trained CLIPSeg weights: {e}")
+                    print("Continuing with random initialization...")
+            
+            return model
+        
+        else:
+            # Original logic for other encoder types
+            model = MedicalSegmenter(
+                encoder_type=encoder_type,
+                num_classes=self.num_classes,
+                pretrained=True,
+                dataset=self,
+            )
+            return model
 
     def visualize_3d(self, sample):
         """
