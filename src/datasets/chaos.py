@@ -12,6 +12,9 @@ from src.ITKReader2D import ITKReader2D
 from src.utils import simple_collate_fn
 from src.volumetricPNGReader import VolumetricPNGReader
 
+#temp 
+from src.utils import DiversitySampler
+
 chaos_labels_mr = [
     "Background",
     "Liver",
@@ -279,13 +282,15 @@ class CHAOS(BaseDataset):
             collate_fn=simple_collate_fn
         )
 
-        self.test_loader = DataLoader(
-            self.test_dataset,
-            shuffle=False,
+
+        self.train_loader = DataLoader(
+            self.train_dataset,
             batch_size=batch_size,
+            sampler=DiversitySampler(self.train_dataset, batch_size),  # <-- Add this
             num_workers=num_workers,
-            pin_memory=True,
-            collate_fn=simple_collate_fn
+            pin_memory=True if torch.cuda.is_available() else False,  # <-- Conditional pin_memory
+            collate_fn=simple_collate_fn,
+            drop_last=True  # <-- Add this to ensure consistent batch sizes
         )
 
         if self.domain == "CT":
