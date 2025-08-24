@@ -164,3 +164,41 @@ def print_memory_usage(stage=""):
         )
     else:
         print(f"{stage} - RAM: {memory_mb:.1f}MB")
+
+
+def simple_collate_fn(batch):
+    """Custom collate function that handles 4-element tuples: (image, label, dict_data, metadata)"""
+    if isinstance(batch[0], tuple) and len(batch[0]) == 4:
+        # Separate the 4 components
+        images = [item[0] for item in batch]
+        labels = [item[1] for item in batch]
+        dict_data = [item[2] for item in batch]
+        metadata = [item[3] for item in batch]
+        
+        # Use default collation for tensors (images and labels)
+        from torch.utils.data._utils.collate import default_collate
+        try:
+            collated_images = default_collate(images)
+            collated_labels = default_collate(labels)
+        except Exception as e:
+            print(f"Error collating images/labels: {e}")
+            # Fallback: stack manually
+            collated_images = torch.stack(images)
+            collated_labels = torch.stack(labels)
+        
+        # For dict_data and metadata, just return as lists since they're not used in training
+        return collated_images, collated_labels, dict_data, metadata
+    
+    elif isinstance(batch[0], tuple) and len(batch[0]) == 2:
+        # Fallback for 2-element tuples
+        data_batch = [item[0] for item in batch]
+        metadata_batch = [item[1] for item in batch]
+        
+        from torch.utils.data._utils.collate import default_collate
+        collated_data = default_collate(data_batch)
+        return collated_data, metadata_batch
+    
+    else:
+        # Fallback to default collation
+        from torch.utils.data._utils.collate import default_collate
+        return default_collate(batch)

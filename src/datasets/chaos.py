@@ -9,6 +9,7 @@ from monai.data import DataLoader
 from src.datasets.common import BaseDataset
 from src.ImageDataset import ImageDataset
 from src.ITKReader2D import ITKReader2D
+from src.utils import simple_collate_fn
 from src.volumetricPNGReader import VolumetricPNGReader
 
 chaos_labels_mr = [
@@ -266,6 +267,7 @@ class CHAOS(BaseDataset):
             batch_size=batch_size,
             num_workers=num_workers,
             pin_memory=True,
+            collate_fn=simple_collate_fn
         )
 
         self.val_loader = DataLoader(
@@ -274,6 +276,7 @@ class CHAOS(BaseDataset):
             batch_size=batch_size,
             num_workers=num_workers,
             pin_memory=True,
+            collate_fn=simple_collate_fn
         )
 
         self.test_loader = DataLoader(
