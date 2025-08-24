@@ -394,7 +394,7 @@ class MedicalSegmenter(nn.Module):
         # class_weights[0] = 0.2  # Reduce background weight (adjust as needed)
 
         loss_function = DiceCELoss(
-            include_background=True,
+            include_background=False, #from True to False testing on CHAOS MR
             to_onehot_y=True,
             softmax=True,
             lambda_dice=0.7,
