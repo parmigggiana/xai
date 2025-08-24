@@ -156,7 +156,7 @@ class CHAOS(BaseDataset):
         self,
         location,
         domain: str,
-        slice_2d: bool = False,
+        slice_2d: bool = True,
         liver_only: bool = False,
         transform=None,
         seg_transform=None,
@@ -262,7 +262,7 @@ class CHAOS(BaseDataset):
         # Create DataLoaders
         self.train_loader = DataLoader(
             self.train_dataset,
-            # shuffle=True,
+            shuffle=True,
             batch_size=batch_size,
             num_workers=num_workers,
             pin_memory=True,
