@@ -426,6 +426,15 @@ class MedicalSegmenter(nn.Module):
         batch_idx,
     ):
         """Process a single training batch with error handling."""
+        if batch_idx == 0:
+            print("[DEBUG LABELS] Before any processing:", torch.unique(batch[1]))
+    
+        # Apply dataset-specific label decoding if available
+        if hasattr(self.dataset, "decode") and self.training_mode:
+            batch[1] = self.dataset.decode(batch[1])
+            if batch_idx == 0:
+                print("[DEBUG LABELS] After decode:", torch.unique(batch[1]))
+
         try:
             
             optimizer.zero_grad()

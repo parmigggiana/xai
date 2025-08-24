@@ -264,13 +264,23 @@ class CHAOS(BaseDataset):
         )
 
         # Create DataLoaders
+        # self.train_loader = DataLoader( #Original
+#             self.train_dataset,
+#             shuffle=True,
+#             batch_size=batch_size,
+#             num_workers=num_workers,
+#             pin_memory=True,
+#             collate_fn=simple_collate_fn
+#        )
+
         self.train_loader = DataLoader(
             self.train_dataset,
-            shuffle=True,
             batch_size=batch_size,
+            sampler=DiversitySampler(self.train_dataset, batch_size),  # <-- Add this
             num_workers=num_workers,
-            pin_memory=True,
-            collate_fn=simple_collate_fn
+            pin_memory=True if torch.cuda.is_available() else False,  # <-- Conditional pin_memory
+            collate_fn=simple_collate_fn,
+            drop_last=True  # <-- Add this to ensure consistent batch sizes
         )
 
         self.val_loader = DataLoader(
@@ -282,16 +292,6 @@ class CHAOS(BaseDataset):
             collate_fn=simple_collate_fn
         )
 
-
-        self.train_loader = DataLoader(
-            self.train_dataset,
-            batch_size=batch_size,
-            sampler=DiversitySampler(self.train_dataset, batch_size),  # <-- Add this
-            num_workers=num_workers,
-            pin_memory=True if torch.cuda.is_available() else False,  # <-- Conditional pin_memory
-            collate_fn=simple_collate_fn,
-            drop_last=True  # <-- Add this to ensure consistent batch sizes
-        )
 
         if self.domain == "CT":
             self.classnames = chaos_labels_ct
