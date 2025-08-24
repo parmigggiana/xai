@@ -342,6 +342,8 @@ class CHAOS(BaseDataset):
     def decode(self, labels):
         """Decode labels to match the original dataset encoding."""
         if self.domain in ["MR", "MRI"]:
+            if labels.max() < 63: #already decoded
+                return labels
             return labels // 63
         elif self.domain == "CT":
             return torch.where(labels > 0, 1, 0)
