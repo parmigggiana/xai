@@ -285,6 +285,7 @@ class CHAOS(BaseDataset):
             batch_size=batch_size,
             num_workers=num_workers,
             pin_memory=True,
+            collate_fn=simple_collate_fn
         )
 
         if self.domain == "CT":
