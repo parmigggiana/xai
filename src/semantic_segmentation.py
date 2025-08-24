@@ -428,12 +428,16 @@ class MedicalSegmenter(nn.Module):
         """Process a single training batch with error handling."""
         if batch_idx == 0:
             print("[DEBUG LABELS] Before any processing:", torch.unique(batch[1]))
-    
+        
+        # Extract elements from the tuple
+        images = batch[0]
+        labels = batch[1]
+        
         # Apply dataset-specific label decoding if available
-        if hasattr(self.dataset, "decode") and self.training_mode:
-            batch[1] = self.dataset.decode(batch[1])
+        if hasattr(self.dataset, "decode") and self.training:
+            labels = self.dataset.decode(labels)  # Modify the variable, not the tuple
             if batch_idx == 0:
-                print("[DEBUG LABELS] After decode:", torch.unique(batch[1]))
+                print("[DEBUG LABELS] After decode:", torch.unique(labels))
 
         try:
             
