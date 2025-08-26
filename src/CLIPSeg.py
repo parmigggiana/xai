@@ -93,7 +93,7 @@ class CLIPSeg(nn.Module):
         # Initialize CLIPSeg model
         default_kwargs = {
             "extract_layers": (3, 6, 9),
-            "reduce_dim": 64, #Reduced from 128
+            "reduce_dim": 64,  # Reduced from 128
             "prompt": "shuffle+",
             "complex_trans_conv": True,
         }

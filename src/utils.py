@@ -174,79 +174,87 @@ def simple_collate_fn(batch):
         labels = [item[1] for item in batch]
         dict_data = [item[2] for item in batch]
         metadata = [item[3] for item in batch]
-        
+
         # Check for duplicates or similar images
         from torch.utils.data._utils.collate import default_collate
-        
+
         try:
             # Standard collation
             collated_images = default_collate(images)
             collated_labels = default_collate(labels)
-            
+
             # Optionally add batch augmentation here
             # This applies different augmentations to different items in batch
-            
+
             return collated_images, collated_labels, dict_data, metadata
         except Exception as e:
             print(f"Error in collation: {e}")
             # More robust fallback
             return torch.stack(images), torch.stack(labels), dict_data, metadata
-    
+
     elif isinstance(batch[0], tuple) and len(batch[0]) == 2:
         # Fallback for 2-element tuples
         data_batch = [item[0] for item in batch]
         metadata_batch = [item[1] for item in batch]
-        
+
         from torch.utils.data._utils.collate import default_collate
+
         collated_data = default_collate(data_batch)
         return collated_data, metadata_batch
-    
+
     else:
         # Fallback to default collation
         from torch.utils.data._utils.collate import default_collate
+
         return default_collate(batch)
-    
+
+
 ################################### Testing Sampler ####################################
 
-from torch.utils.data import Sampler
-import numpy as np
 import random
+
+import numpy as np
+from torch.utils.data import Sampler
+
 
 class DiversitySampler(Sampler):
     """Custom sampler that ensures diverse samples within each batch"""
+
     def __init__(self, dataset, batch_size, seed=42):
         self.dataset_size = len(dataset)
         self.batch_size = batch_size
         self.seed = seed
         self.rng = np.random.RandomState(seed)
-        
+
         # If dataset has metadata we can use for diversity assessment
-        self.has_metadata = hasattr(dataset, '__getitem__') and hasattr(dataset[0], '__len__')
+        self.has_metadata = hasattr(dataset, "__getitem__") and hasattr(
+            dataset[0], "__len__"
+        )
         if self.has_metadata and len(dataset[0]) >= 3:
             print("DiversitySampler: Using metadata for enhanced diversity")
-    
+
     def __iter__(self):
         # Create shuffled indices
         indices = list(range(self.dataset_size))
         self.rng.shuffle(indices)
-        
+
         # Organize indices to maximize batch diversity
         num_batches = self.dataset_size // self.batch_size
-        
+
         # Strategy: interleave samples rather than taking consecutive ones
         reorganized = []
         for i in range(self.batch_size):
             for j in range(num_batches):
-                idx = j*self.batch_size + i
+                idx = j * self.batch_size + i
                 if idx < self.dataset_size:
                     reorganized.append(indices[idx])
-        
+
         # Add any remaining indices
         remaining = self.dataset_size - len(reorganized)
         if remaining > 0:
             reorganized.extend(indices[-remaining:])
-            
+
         return iter(reorganized)
-    
+
     def __len__(self):
         return self.dataset_size

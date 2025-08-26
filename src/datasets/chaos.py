@@ -4,16 +4,13 @@ from typing import Callable, Optional, Tuple
 import numpy as np
 import torch
 from matplotlib import cm
-from monai.data import DataLoader
+from monai.data import DataLoader, ITKReader, PILReader
 
 from src.datasets.common import BaseDataset
 from src.ImageDataset import ImageDataset
 from src.ITKReader2D import ITKReader2D
 from src.utils import simple_collate_fn
 from src.volumetricPNGReader import VolumetricPNGReader
-
-#temp 
-from src.utils import DiversitySampler
 
 chaos_labels_mr = [
     "Background",
@@ -90,8 +87,8 @@ class PyTorchCHAOS(ImageDataset):
             seg_files=seg_files,
             transform=transform,
             seg_transform=seg_transform,
-            reader=ITKReader2D(),  # Use our fixed reader
-            seg_reader=VolumetricPNGReader(),
+            reader=ITKReader2D() if slice_2d else ITKReader(),  # Use our fixed reader
+            seg_reader=PILReader() if slice_2d else VolumetricPNGReader(),
             image_only=False,
             transform_with_metadata=True,
         )
@@ -153,6 +150,12 @@ class PyTorchCHAOS(ImageDataset):
             img_path = patient_id / "T2SPIR" / "DICOM_anon"
             seg_path = patient_id / "T2SPIR" / "Ground"
         return img_path, seg_path
+
+    # def __getitem__(self, index):
+    #     print(f"Fetching item at index: {index}")
+    #     print(f"Item path: {self.image_files[index]}")
+    #     print(f"Segmentation path: {self.seg_files[index]}")
+    #     return super().__getitem__(index)
 
 
 class CHAOS(BaseDataset):
@@ -264,23 +267,13 @@ class CHAOS(BaseDataset):
         )
 
         # Create DataLoaders
-        # self.train_loader = DataLoader( #Original
-#             self.train_dataset,
-#             shuffle=True,
-#             batch_size=batch_size,
-#             num_workers=num_workers,
-#             pin_memory=True,
-#             collate_fn=simple_collate_fn
-#        )
-
         self.train_loader = DataLoader(
             self.train_dataset,
+            shuffle=True,
             batch_size=batch_size,
-            sampler=DiversitySampler(self.train_dataset, batch_size),  # <-- Add this
             num_workers=num_workers,
-            pin_memory=True if torch.cuda.is_available() else False,  # <-- Conditional pin_memory
+            pin_memory=True if torch.cuda.is_available() else False,
             collate_fn=simple_collate_fn,
-            drop_last=True  # <-- Add this to ensure consistent batch sizes
         )
 
         self.val_loader = DataLoader(
@@ -289,9 +282,8 @@ class CHAOS(BaseDataset):
             batch_size=batch_size,
             num_workers=num_workers,
             pin_memory=True,
-            collate_fn=simple_collate_fn
+            collate_fn=simple_collate_fn,
         )
-
 
         if self.domain == "CT":
             self.classnames = chaos_labels_ct
@@ -310,7 +302,7 @@ class CHAOS(BaseDataset):
             ),
         )
 
-    def visualize_sample_slice(self, sample, rotate=0, flip_axis=1):
+    def visualize_sample_slice(self, sample, rotate=0, flip_axis=-2):
         return self._visualize_sample_slice(sample, rotate, flip_axis=flip_axis)
 
     def _get_organ_legend(self, seg_slice):

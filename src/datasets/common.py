@@ -9,7 +9,6 @@ except ImportError:
 import numpy as np
 import torch
 from matplotlib import cm
-from matplotlib.colors import ListedColormap
 
 from src.semantic_segmentation import MedicalSegmenter
 
@@ -38,7 +37,7 @@ class BaseDataset:
         Returns:
             MedicalSegmenter or CLIPSeg: Model with semantic guidance capabilities
         """
-        
+
         # Original logic for other encoder types
         model = MedicalSegmenter(
             encoder_type=encoder_type,
@@ -143,13 +142,13 @@ class BaseDataset:
         from matplotlib.colors import ListedColormap
 
         img, seg = sample["image"], sample["label"]
-        
+
         # Convert to numpy if tensors
-        if hasattr(img, 'cpu'):
+        if hasattr(img, "cpu"):
             img = img.cpu().numpy()
-        if hasattr(seg, 'cpu'):
+        if hasattr(seg, "cpu"):
             seg = seg.cpu().numpy()
-        
+
         # Handle different input shapes
         if img.ndim == 3:
             if img.shape[0] <= 3:  # Likely (C, H, W) format
@@ -175,45 +174,41 @@ class BaseDataset:
 
         # Ensure seg_slice is at least 2D for rotation
         if seg_slice.ndim < 2:
-            print(f"Warning: seg_slice is {seg_slice.ndim}D with shape {seg_slice.shape}. Skipping rotation.")
+            print(
+                f"Warning: seg_slice is {seg_slice.ndim}D with shape {seg_slice.shape}. Skipping rotation."
+            )
             rotate = 0  # Skip rotation for 1D arrays
 
-        # Create the plot
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4))
-
+        # Apply rotation exactly once (if requested)
         if rotate != 0:
             # Rotate image slice
-            if img_slice.ndim >= 2:
+            if img_slice.ndim == 3 and img_slice.shape[0] in (1, 3):
+                # (C, H, W): rotate per-channel
+                channels = []
+                for c in range(img_slice.shape[0]):
+                    channels.append(np.rot90(img_slice[c], k=rotate))
+                img_slice = np.stack(channels, axis=0)
+            elif img_slice.ndim >= 2:
+                # 2D (H, W) or other 2D-like
                 img_slice = np.rot90(img_slice, k=rotate)
-            
-            # Rotate segmentation slice - only if it's 2D or higher
+
+            # Rotate segmentation slice
             if seg_slice.ndim >= 2:
                 seg_slice = np.rot90(seg_slice, k=rotate)
             else:
-                print(f"Warning: Cannot rotate seg_slice with shape {seg_slice.shape} (ndim={seg_slice.ndim})")
-                
-        if rotate != 0 and seg_slice.ndim >= 2:
-            # For multi-channel images, rotate each channel separately
-            if img_slice.ndim == 3:  # (C, H, W) format
-                # Rotate each channel individually to preserve structure
-                rotated_channels = []
-                for c in range(img_slice.shape[0]):
-                    rotated_channel = np.rot90(img_slice[c], k=rotate)
-                    rotated_channels.append(rotated_channel)
-                img_slice = np.stack(rotated_channels, axis=0)
-            elif img_slice.ndim == 2:  # 2D image
-                img_slice = np.rot90(img_slice, k=rotate)
-    
-            # For segmentation mask - only rotate if 2D or higher
-            if seg_slice.ndim >= 2:
-                seg_slice = np.rot90(seg_slice, k=rotate)
-            
+                print(
+                    f"Warning: Cannot rotate seg_slice with shape {seg_slice.shape} (ndim={seg_slice.ndim})"
+                )
+
+        # Create the plot
+        _fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 4))
 
         # Apply flipping if specified and data is at least 2D
         if flip_axis is not None and seg_slice.ndim >= 2:
             if isinstance(flip_axis, int):
                 flip_axis = (flip_axis,)
-            
+
+            print(f"IMAGE SHAPE: {img_slice.shape}, SEG SHAPE: {seg_slice.shape}")
             for axis in flip_axis:
                 if axis < img_slice.ndim:
                     img_slice = np.flip(img_slice, axis=axis)
@@ -233,9 +228,15 @@ class BaseDataset:
             ax1.imshow(img_slice, cmap="gray")
         else:  # 1D or other cases
             print(f"Cannot display image slice with shape {img_slice.shape}")
-            ax1.text(0.5, 0.5, f"Cannot display\nshape: {img_slice.shape}", 
-                    ha='center', va='center', transform=ax1.transAxes)
-        
+            ax1.text(
+                0.5,
+                0.5,
+                f"Cannot display\nshape: {img_slice.shape}",
+                ha="center",
+                va="center",
+                transform=ax1.transAxes,
+            )
+
         ax1.set_title("Image Slice")
         ax1.axis("off")
 
@@ -248,24 +249,32 @@ class BaseDataset:
                 img_display = np.transpose(img_slice, (1, 2, 0))
                 img_gray = np.dot(img_display, [0.299, 0.587, 0.114])
             else:
-                img_gray = img_slice[0] if img_slice.shape[0] > 1 else img_slice.squeeze()
+                img_gray = (
+                    img_slice[0] if img_slice.shape[0] > 1 else img_slice.squeeze()
+                )
             ax2.imshow(img_gray, cmap="gray")
         elif img_slice.ndim == 2:
             ax2.imshow(img_slice, cmap="gray")
         else:
-            ax2.text(0.5, 0.5, f"Cannot display\nshape: {img_slice.shape}", 
-                    ha='center', va='center', transform=ax2.transAxes)
-        
+            ax2.text(
+                0.5,
+                0.5,
+                f"Cannot display\nshape: {img_slice.shape}",
+                ha="center",
+                va="center",
+                transform=ax2.transAxes,
+            )
+
         # Create masked overlay only if seg_slice is 2D
         if seg_slice.ndim >= 2:
             masked_overlay = np.ma.masked_where(seg_slice == 0, seg_slice)
-            
+
             # Get legend and display overlay with colors
             legend = self._get_organ_legend(seg_slice)
             if legend:
                 legend_colors = ListedColormap([legend[label] for label in legend])
                 ax2.imshow(masked_overlay, cmap=legend_colors, alpha=0.4)
-                
+
                 legend_elements = [
                     plt.Line2D(
                         [0],
@@ -285,9 +294,15 @@ class BaseDataset:
                     facecolor="white",
                 )
         else:
-            ax2.text(0.5, 0.5, f"Cannot display segmentation\nshape: {seg_slice.shape}", 
-                    ha='center', va='center', transform=ax2.transAxes)
-        
+            ax2.text(
+                0.5,
+                0.5,
+                f"Cannot display segmentation\nshape: {seg_slice.shape}",
+                ha="center",
+                va="center",
+                transform=ax2.transAxes,
+            )
+
         ax2.set_title("Overlay Segmentation")
         ax2.axis("off")
         plt.tight_layout()

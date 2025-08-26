@@ -283,9 +283,14 @@ class MMWHS(BaseDataset):
         legend = {}
 
         set1 = cm.get_cmap("Set1", 8)
-        for i, (label_val, organ_name) in enumerate(mmwhs_labels):
+        # Skip background (label 0) in legend
+        color_idx = 0
+        for label_val, organ_name in mmwhs_labels.items():
+            if label_val == 0:
+                continue
             if np.any(seg_slice == label_val):
-                legend[organ_name] = set1(i + 1)  # Skip the first color (background)
+                legend[organ_name] = set1(color_idx)
+                color_idx += 1
 
         return legend
 

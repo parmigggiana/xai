@@ -9,6 +9,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from clip.model import CLIP
+from clipseg.clipseg import CLIPDensePredT
 from monai.apps import download_url
 from monai.losses import DiceCELoss
 from monai.metrics import DiceMetric, HausdorffDistanceMetric
@@ -16,11 +18,6 @@ from monai.networks.nets import SwinUNETR
 from tqdm import tqdm
 
 from src.CLIPSeg import CLIPSeg
-from clipseg.clipseg import CLIPDensePredT
-from clip.model import CLIP
-
-
-
 
 
 class MedicalSegmenter(nn.Module):
@@ -78,7 +75,7 @@ class MedicalSegmenter(nn.Module):
                 background_class=True,
                 dataset_info=dataset_info,
             )
-            
+
             # Download and load weights
             resource = "https://owncloud.gwdg.de/index.php/s/ioHbRzFx6th32hn/download"
             dst = Path("./data/weights.zip")
@@ -89,25 +86,35 @@ class MedicalSegmenter(nn.Module):
                 dst.unlink(missing_ok=True)
 
             print("🔄 Loading CLIPSeg weights...")
-            from transformers import CLIPVisionModel, CLIPTextModel
-            
+            from transformers import CLIPTextModel, CLIPVisionModel
+
             safe_globals = [
-                CLIPDensePredT, CLIP, CLIPVisionModel, CLIPTextModel,
-                torch.nn.Module, torch.nn.Conv2d, torch.nn.Linear, 
-                torch.nn.BatchNorm2d, torch.nn.LayerNorm, torch.nn.Dropout, 
-                torch.nn.ReLU, torch.nn.GELU
+                CLIPDensePredT,
+                CLIP,
+                CLIPVisionModel,
+                CLIPTextModel,
+                torch.nn.Module,
+                torch.nn.Conv2d,
+                torch.nn.Linear,
+                torch.nn.BatchNorm2d,
+                torch.nn.LayerNorm,
+                torch.nn.Dropout,
+                torch.nn.ReLU,
+                torch.nn.GELU,
             ]
-            
+
             with torch.serialization.safe_globals(safe_globals=safe_globals):
                 state_dict = torch.load(
                     "data/clipseg_weights/rd64-uni-refined.pth",
-                    map_location=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+                    map_location=torch.device(
+                        "cuda" if torch.cuda.is_available() else "cpu"
+                    ),
                     weights_only=False,
                 )
-            
+
                 # Carica i pesi nel componente clipseg specifico
                 model.clipseg.load_state_dict(state_dict, strict=False)
-            
+
             self.encoder = model
             self.head = model.head
 
@@ -273,19 +280,19 @@ class MedicalSegmenter(nn.Module):
             param.requires_grad = True
 
     def finetune(
-    self,
-    epochs: int = 5,
-    learning_rate: float = 1e-4, 
-    weight_decay: float = 1e-5,
-    save_best: bool = True,
-    max_grad_norm: float = 5.0,  #previously 1.0
-):
+        self,
+        epochs: int = 5,
+        learning_rate: float = 1e-4,
+        weight_decay: float = 1e-5,
+        save_best: bool = True,
+        max_grad_norm: float = 5.0,  # previously 1.0
+    ):
         if self.dataset is None:
             raise ValueError("Dataset must be provided to finetune the model")
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.to(device)
-        torch.backends.cudnn.benchmark = True
+        # torch.backends.cudnn.benchmark = True
 
         print(f"🚀 Starting training for {epochs} epochs")
         print(f"   Device: {device}")
@@ -295,6 +302,36 @@ class MedicalSegmenter(nn.Module):
         loss_function, dice_metric, optimizer, scaler = self._setup_training_components(
             learning_rate, weight_decay
         )
+
+        # Debug: parameter counts and trainable modules
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"   Params: total={total_params:,}, trainable={trainable_params:,}")
+
+        try:
+            n_train_batches = len(self.dataset.train_loader)
+            n_val_batches = len(self.dataset.val_loader)
+            print(f"   Batches: train={n_train_batches}, val={n_val_batches}")
+        except Exception:
+            pass
+
+        # Choose a few tracked parameters (prefer head/out) to monitor updates
+        tracked = []
+        for name, p in self.named_parameters():
+            if p.requires_grad and ("head" in name or ".out" in name):
+                tracked.append((name, p))
+            if len(tracked) >= 3:
+                break
+        if not tracked:
+            for name, p in self.named_parameters():
+                if p.requires_grad:
+                    tracked.append((name, p))
+                if len(tracked) >= 3:
+                    break
+        if tracked:
+            print("   Tracking params:")
+            for n, _ in tracked:
+                print(f"     - {n}")
 
         history = {"train_loss": [], "val_loss": [], "val_dice": []}
 
@@ -309,9 +346,25 @@ class MedicalSegmenter(nn.Module):
             self.train()
             train_losses = []
 
+            # Debug: snapshot tracked param norms before epoch
+            pre_norms = {n: p.detach().float().norm().item() for n, p in tracked}
+            # Debug: epoch aggregates
+            epoch_unique_labels = set()
+            grad_nonzero_batches = 0
+            batch_count = 0
+
+            # Debug: print current LR(s)
+            try:
+                lrs = [pg.get("lr", None) for pg in optimizer.param_groups]
+                print(
+                    f"   LR(s): {', '.join(f'{lr:.6e}' for lr in lrs if lr is not None)}"
+                )
+            except Exception:
+                pass
+
             train_pbar = tqdm(self.dataset.train_loader, desc="Training")
             for batch_idx, batch in enumerate(train_pbar):
-                outputs, loss_value, success = self._process_training_batch(
+                outputs, loss_value, success, dbg = self._process_training_batch(
                     batch,
                     device,
                     loss_function,
@@ -326,10 +379,56 @@ class MedicalSegmenter(nn.Module):
                     avg_loss = np.mean(train_losses[-3:])
                     train_pbar.set_postfix({"Loss": f"{avg_loss:.4f}"})
 
+                    # Update epoch-level debug stats
+                    batch_count += 1
+                    if dbg is not None:
+                        if "unique_labels" in dbg:
+                            try:
+                                epoch_unique_labels.update(
+                                    dbg["unique_labels"]
+                                )  # list of ints
+                            except Exception:
+                                pass
+                        if "grad_norm" in dbg and dbg["grad_norm"] is not None:
+                            if dbg["grad_norm"] > 0:
+                                grad_nonzero_batches += 1
+
             if train_losses:
                 epoch_train_loss = float(np.mean(train_losses))
                 history["train_loss"].append(epoch_train_loss)
                 print(f"Epoch {epoch+1} - Train Loss: {epoch_train_loss:.4f}")
+
+            # Debug: parameter update magnitudes on tracked params
+            post_norms = {n: p.detach().float().norm().item() for n, p in tracked}
+            if tracked:
+                print("   Param norm deltas (after epoch):")
+                for n in pre_norms:
+                    delta = post_norms[n] - pre_norms[n]
+                    print(
+                        f"     {n}: Δnorm={delta:+.6e} (before={pre_norms[n]:.6e}, after={post_norms[n]:.6e})"
+                    )
+
+            # Debug: epoch gradient non-zero ratio and label coverage
+            if batch_count > 0:
+                ratio = grad_nonzero_batches / batch_count
+                print(
+                    f"   Grad non-zero in batches: {grad_nonzero_batches}/{batch_count} ({ratio:.1%})"
+                )
+            if epoch_unique_labels:
+                try:
+                    print(
+                        f"   Labels seen this epoch: {sorted(list(epoch_unique_labels))}"
+                    )
+                except Exception:
+                    pass
+
+            # Debug: AMP scaler
+            try:
+                cur_scale = scaler.get_scale() if scaler is not None else None
+                if cur_scale is not None:
+                    print(f"   GradScaler scale: {cur_scale}")
+            except Exception:
+                pass
 
             self.eval()
             val_losses = []
@@ -372,7 +471,10 @@ class MedicalSegmenter(nn.Module):
 
             if save_best and epoch_val_dice > best_val_dice:
                 best_val_dice = epoch_val_dice
-                best_model_state = {k: v.cpu().clone() for k, v in self.state_dict().items()}
+                best_model_state = {
+                    k: v.cpu().clone() for k, v in self.state_dict().items()
+                }
+                print(f"   ✅ New best Val Dice: {best_val_dice:.4f}")
 
         if save_best and best_model_state is not None:
             best_model_state = {k: v.to(device) for k, v in best_model_state.items()}
@@ -380,8 +482,6 @@ class MedicalSegmenter(nn.Module):
 
         print("\n✅ Training completed!")
         return history
-
-
 
     def _setup_training_components(self, learning_rate, weight_decay):
         """Setup loss function, metrics, optimizer, and scaler for training."""
@@ -428,9 +528,9 @@ class MedicalSegmenter(nn.Module):
         """Process a single training batch with error handling."""
 
         try:
-            
+
             optimizer.zero_grad()
-            
+
             images = batch[0].to(device, non_blocking=True)
             labels = batch[1].to(device, non_blocking=True)
 
@@ -446,19 +546,20 @@ class MedicalSegmenter(nn.Module):
             # max_label = labels.max().item()
             # if max_label >= self.num_classes:
             #     labels = torch.clamp(labels, 0, self.num_classes - 1)
-            
+
             # Forward pass with mixed precision
             with torch.amp.autocast(device.type):
                 outputs = self.forward(images)
                 loss = loss_function(outputs, labels)
 
-            # Debug ogni 10 batch
+            # Debug ogni 20 batch
             if batch_idx % 20 == 0:
+                uniq = np.unique(labels.detach().cpu().numpy())
                 print(f"[DEBUG] Batch {batch_idx} - Loss: {loss.item():.6f}")
-                print(f"[DEBUG] Unique labels: {torch.unique(labels)}")
-                print(f"[DEBUG] Outputs -> mean: {outputs.mean().item():.6f}, std: {outputs.std().item():.6f}")
-
-
+                print(f"[DEBUG] Unique labels: {uniq}")
+                print(
+                    f"[DEBUG] Outputs -> mean: {outputs.mean().item():.6f}, std: {outputs.std().item():.6f}"
+                )
 
             # Backward pass with gradient scaling
             if scaler is not None:
@@ -466,7 +567,7 @@ class MedicalSegmenter(nn.Module):
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
 
-                # ✅ AGGIUNTO: Debug dei gradienti
+                # Debug dei gradienti
                 total_norm = 0
                 param_count = 0
                 for p in self.parameters():
@@ -474,11 +575,12 @@ class MedicalSegmenter(nn.Module):
                         param_norm = p.grad.data.norm(2)
                         total_norm += param_norm.item() ** 2
                         param_count += 1
-                total_norm = total_norm ** (1. / 2)
-                
-                if batch_idx % 20 == 0:
-                    print(f"[DEBUG] Gradient norm: {total_norm:.8f} (params with grad: {param_count})")
+                total_norm = total_norm ** (1.0 / 2)
 
+                if batch_idx % 20 == 0:
+                    print(
+                        f"[DEBUG] Gradient norm: {total_norm:.8f} (params with grad: {param_count})"
+                    )
 
                 scaler.step(optimizer)
                 scaler.update()
@@ -487,18 +589,26 @@ class MedicalSegmenter(nn.Module):
                 torch.nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
                 optimizer.step()
 
+            # Prepare debug info
+            dbg = {
+                "grad_norm": float(total_norm) if "total_norm" in locals() else None,
+                "unique_labels": [
+                    int(x) for x in np.unique(labels.detach().cpu().numpy()).tolist()
+                ],
+            }
+
             # Clean up intermediate tensors
             del images, labels
 
-            return outputs, loss.item(), True
+            return outputs, loss.item(), True, dbg
         except torch.cuda.OutOfMemoryError:
             print(f"❌ OOM at batch {batch_idx}, clearing cache and continuing...")
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            return None, 0.0, False
+            return None, 0.0, False, None
         # except Exception as e:
         #     print(f"⚠️ Error at batch {batch_idx}: {e}")
-        #     return None, 0.0, False
+        #     return None, 0.0, False, None
 
     def load_task_vector(self, task_vector):
         """Load a task vector into the model."""
