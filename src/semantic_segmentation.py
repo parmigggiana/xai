@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import matplotlib.pyplot as plt
 from clip.model import CLIP
 from clipseg.clipseg import CLIPDensePredT
 from monai.apps import download_url
@@ -298,6 +299,7 @@ class MedicalSegmenter(nn.Module):
         weight_decay: float = 1e-5,
         save_best: bool = True,
         max_grad_norm: float = 5.0,  # previously 1.0
+        visualize_batches: bool = True,
     ):
         if self.dataset is None:
             raise ValueError("Dataset must be provided to finetune the model")
@@ -468,28 +470,30 @@ class MedicalSegmenter(nn.Module):
                     preds = torch.argmax(outputs, dim=1, keepdim=True)
                     dice_metric(y_pred=preds, y=labels)
 
-                    # Print compact debug info (limit verbose output)
-                    try:
-                        imgs_np = images.detach().cpu().numpy()
-                        labels_np = labels.detach().cpu().numpy()
-                        preds_np = preds.detach().cpu().numpy()
-                        print(
-                            f"[DEBUG] Val batch {batch_idx} - images:{imgs_np.shape}, labels:{labels_np.shape}, preds:{preds_np.shape}"
-                        )
-                        print(
-                            f"[DEBUG] Val batch {batch_idx} - unique labels: {np.unique(labels_np)}, unique preds: {np.unique(preds_np)}"
-                        )
-                        # print small sample to inspect values without flooding
-                        flat_labels = labels_np.flatten()
-                        flat_preds = preds_np.flatten()
-                        print(
-                            f"[DEBUG] sample labels[:20]: {flat_labels[:20]}"
-                        )
-                        print(
-                            f"[DEBUG] sample preds[:20]: {flat_preds[:20]}"
-                        )
-                    except Exception as e:
-                        print(f"[DEBUG] Failed to print val batch {batch_idx}: {e}")
+                    # Print or visualize debug info (limit verbose output)
+                    if visualize_batches:
+                        try:
+                            self._visualize_batch(images, preds, labels, title=f"Val batch {batch_idx}")
+                        except Exception as e:
+                            print(f"[DEBUG] Visualization failed for val batch {batch_idx}: {e}")
+                    else:
+                        try:
+                            imgs_np = images.detach().cpu().numpy()
+                            labels_np = labels.detach().cpu().numpy()
+                            preds_np = preds.detach().cpu().numpy()
+                            print(
+                                f"[DEBUG] Val batch {batch_idx} - images:{imgs_np.shape}, labels:{labels_np.shape}, preds:{preds_np.shape}"
+                            )
+                            print(
+                                f"[DEBUG] Val batch {batch_idx} - unique labels: {np.unique(labels_np)}, unique preds: {np.unique(preds_np)}"
+                            )
+                            # print small sample to inspect values without flooding
+                            flat_labels = labels_np.flatten()
+                            flat_preds = preds_np.flatten()
+                            print(f"[DEBUG] sample labels[:20]: {flat_labels[:20]}")
+                            print(f"[DEBUG] sample preds[:20]: {flat_preds[:20]}")
+                        except Exception as e:
+                            print(f"[DEBUG] Failed to print val batch {batch_idx}: {e}")
 
                 epoch_val_loss = float(np.mean(val_losses)) if val_losses else 0.0
                 dice_result = dice_metric.aggregate()
@@ -655,7 +659,50 @@ class MedicalSegmenter(nn.Module):
                 if name in task_vector.vector:
                     param.data += task_vector.vector[name]
 
-    def evaluate(self):
+    def _visualize_batch(self, images, preds, labels, title: str = "batch"):
+        """Display images, predictions and labels side-by-side for the first item in the batch.
+
+        Expects images: [B, C, H, W] or [B, 1, H, W]; preds/labels: [B, 1, H, W] (class indices).
+        """
+        # Move to cpu numpy
+        imgs = images.detach().cpu()
+        p = preds.detach().cpu()
+        l = labels.detach().cpu()
+
+        # Take first element
+        img = imgs[0]
+        pred = p[0]
+        lab = l[0]
+
+        # Squeeze channel dims
+        if img.ndim == 3 and img.shape[0] == 1:
+            img = img.squeeze(0)
+        elif img.ndim == 3 and img.shape[0] > 1:
+            # If multi-channel, take first channel for display
+            img = img[0]
+
+        if pred.ndim > 2:
+            pred = pred.squeeze(0)
+        if lab.ndim > 2:
+            lab = lab.squeeze(0)
+
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+        axes[0].imshow(img, cmap="gray")
+        axes[0].set_title(f"{title} - image")
+        axes[0].axis("off")
+
+        axes[1].imshow(pred, cmap="viridis")
+        axes[1].set_title(f"{title} - pred")
+        axes[1].axis("off")
+
+        axes[2].imshow(lab, cmap="viridis")
+        axes[2].set_title(f"{title} - label")
+        axes[2].axis("off")
+
+        plt.tight_layout()
+        plt.show()
+
+    def evaluate(self, visualize: bool = False):
         """
         Evaluate the model and return metrics on both train and test loaders.
         Memory-optimized version with aggressive memory management for large datasets like MMWHS.
@@ -719,23 +766,29 @@ class MedicalSegmenter(nn.Module):
                     dice_metric(y_pred=preds, y=labels)
                     hausdorff_metric(y_pred=preds, y=labels)
 
-                    # Print compact debug info for evaluation batches
-                    try:
-                        imgs_np = images.detach().cpu().numpy()
-                        labels_np = labels.detach().cpu().numpy()
-                        preds_np = preds.detach().cpu().numpy()
-                        print(
-                            f"[DEBUG] Eval {split} batch {idx} - images:{imgs_np.shape}, labels:{labels_np.shape}, preds:{preds_np.shape}"
-                        )
-                        print(
-                            f"[DEBUG] Eval {split} batch {idx} - unique labels: {np.unique(labels_np)}, unique preds: {np.unique(preds_np)}"
-                        )
-                        flat_labels = labels_np.flatten()
-                        flat_preds = preds_np.flatten()
-                        print(f"[DEBUG] sample labels[:20]: {flat_labels[:20]}")
-                        print(f"[DEBUG] sample preds[:20]: {flat_preds[:20]}")
-                    except Exception as e:
-                        print(f"[DEBUG] Failed to print eval batch {idx}: {e}")
+                    # Visualize or print compact debug info for evaluation batches
+                    if visualize:
+                        try:
+                            self._visualize_batch(images, preds, labels, title=f"Eval {split} batch {idx}")
+                        except Exception as e:
+                            print(f"[DEBUG] Visualization failed for eval {split} batch {idx}: {e}")
+                    else:
+                        try:
+                            imgs_np = images.detach().cpu().numpy()
+                            labels_np = labels.detach().cpu().numpy()
+                            preds_np = preds.detach().cpu().numpy()
+                            print(
+                                f"[DEBUG] Eval {split} batch {idx} - images:{imgs_np.shape}, labels:{labels_np.shape}, preds:{preds_np.shape}"
+                            )
+                            print(
+                                f"[DEBUG] Eval {split} batch {idx} - unique labels: {np.unique(labels_np)}, unique preds: {np.unique(preds_np)}"
+                            )
+                            flat_labels = labels_np.flatten()
+                            flat_preds = preds_np.flatten()
+                            print(f"[DEBUG] sample labels[:20]: {flat_labels[:20]}")
+                            print(f"[DEBUG] sample preds[:20]: {flat_preds[:20]}")
+                        except Exception as e:
+                            print(f"[DEBUG] Failed to print eval batch {idx}: {e}")
 
             # Aggregate results with error handling
             if has_labels:
