@@ -534,12 +534,13 @@ class MedicalSegmenter(nn.Module):
         class_weights = torch.ones(
             self.num_classes, dtype=torch.float32, device=self.device
         )
-        class_weights[0] = 0.1  # Reduce background weight (adjust as needed)
+        #class_weights[0] = 0.1  # Reduce background weight (adjust as needed)
 
+        # CLIPSeg produces sigmoids / probability-like outputs; do not apply softmax again.
         loss_function = DiceCELoss(
             include_background=True,
             to_onehot_y=True,
-            softmax=True,
+            softmax=False,  # Changed: don't apply softmax to already-probabilistic outputs
             lambda_dice=0.7,
             lambda_ce=0.3,
             weight=class_weights,
@@ -578,6 +579,17 @@ class MedicalSegmenter(nn.Module):
             images = batch[0].to(device, non_blocking=True)
             labels = batch[1].to(device, non_blocking=True)
 
+            # If dataset provides a decode mapping (e.g. CHAOS/MMWHS), apply it here
+            if hasattr(self.dataset, "decode"):
+                try:
+                    labels = self.dataset.decode(labels)
+                except Exception:
+                    pass
+
+            # Ensure labels are integer class indices for to_onehot_y=True
+            if not torch.is_floating_point(labels) or labels.dtype != torch.long:
+                labels = labels.long()
+            
             # Ensure labels are in correct format [B, 1, D, H, W]
             if self.encoder_type == "swin_unetr" and labels.dim() == 4:  # [B, D, H, W]
                 labels = labels.unsqueeze(1)
