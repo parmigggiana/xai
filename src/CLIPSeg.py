@@ -1,4 +1,5 @@
 from typing import Dict, List, Optional, Union
+import itertools
 
 import torch
 import torch.nn as nn
@@ -352,7 +353,11 @@ class CLIPSeg(nn.Module):
         print("=" * 50)
 
     def parameters(self, recurse=True):
-        return self.clipseg.parameters(recurse=recurse)
+        # include both the internal CLIPDensePredT params and the custom head params
+        return itertools.chain(
+            self.clipseg.parameters(recurse=recurse),
+            self.head.parameters(recurse=recurse),
+        )
 
 
 def create_chaos_ct_clipseg(**kwargs) -> CLIPSeg:
