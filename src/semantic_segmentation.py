@@ -724,6 +724,8 @@ class MedicalSegmenter(nn.Module):
             if loader is None:
                 continue
 
+            has_labels = False  # Track if any labels were processed
+
             with torch.no_grad():
                 for idx, batch in enumerate(tqdm(loader, desc=f"Evaluating {split}")):
                     images = batch[0].to(device)
@@ -734,6 +736,7 @@ class MedicalSegmenter(nn.Module):
                         continue
 
                     labels = labels.to(device)
+                    has_labels = True  # At least one batch had labels
 
                     # Remove AMP autocast here as well
                     outputs = self(images)
