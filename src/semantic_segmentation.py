@@ -115,6 +115,18 @@ class MedicalSegmenter(nn.Module):
                 # Carica i pesi nel componente clipseg specifico
                 model.clipseg.load_state_dict(state_dict, strict=False)
 
+            # Ensure CLIPSeg parameters are trainable (requires_grad=True)
+            try:
+                for name, param in model.clipseg.named_parameters():
+                    param.requires_grad = True
+                # Also ensure the head (prediction layers) are trainable
+                for name, param in model.head.named_parameters():
+                    param.requires_grad = True
+            except Exception:
+                # If the model structure differs, fall back to enabling all model params
+                for name, param in model.named_parameters():
+                    param.requires_grad = True
+
             self.encoder = model
             self.head = model.head
 
@@ -435,7 +447,10 @@ class MedicalSegmenter(nn.Module):
             epoch_val_dice = 0.0
 
             with torch.no_grad():
-                for batch in tqdm(self.dataset.val_loader, desc="Validating"):
+                # Print a compact summary of a few validation batches (images, preds, labels)
+                for batch_idx, batch in enumerate(
+                    tqdm(self.dataset.val_loader, desc="Validating")
+                ):
                     images = batch[0].to(device, non_blocking=True)
                     labels = batch[1].to(device, non_blocking=True)
 
@@ -452,6 +467,29 @@ class MedicalSegmenter(nn.Module):
 
                     preds = torch.argmax(outputs, dim=1, keepdim=True)
                     dice_metric(y_pred=preds, y=labels)
+
+                    # Print compact debug info (limit verbose output)
+                    try:
+                        imgs_np = images.detach().cpu().numpy()
+                        labels_np = labels.detach().cpu().numpy()
+                        preds_np = preds.detach().cpu().numpy()
+                        print(
+                            f"[DEBUG] Val batch {batch_idx} - images:{imgs_np.shape}, labels:{labels_np.shape}, preds:{preds_np.shape}"
+                        )
+                        print(
+                            f"[DEBUG] Val batch {batch_idx} - unique labels: {np.unique(labels_np)}, unique preds: {np.unique(preds_np)}"
+                        )
+                        # print small sample to inspect values without flooding
+                        flat_labels = labels_np.flatten()
+                        flat_preds = preds_np.flatten()
+                        print(
+                            f"[DEBUG] sample labels[:20]: {flat_labels[:20]}"
+                        )
+                        print(
+                            f"[DEBUG] sample preds[:20]: {flat_preds[:20]}"
+                        )
+                    except Exception as e:
+                        print(f"[DEBUG] Failed to print val batch {batch_idx}: {e}")
 
                 epoch_val_loss = float(np.mean(val_losses)) if val_losses else 0.0
                 dice_result = dice_metric.aggregate()
@@ -652,7 +690,8 @@ class MedicalSegmenter(nn.Module):
             hausdorff_metric.reset()
             has_labels = False
             with torch.no_grad():
-                for batch in tqdm(loader, desc=f"Evaluating {split}"):
+                # Print a compact summary of a few evaluation batches (images, preds, labels)
+                for idx, batch in enumerate(tqdm(loader, desc=f"Evaluating {split}")):
                     images = batch[0].to(device, non_blocking=True)
                     labels = batch[1] if len(batch) > 1 else None
 
@@ -679,6 +718,24 @@ class MedicalSegmenter(nn.Module):
                     # Compute metrics
                     dice_metric(y_pred=preds, y=labels)
                     hausdorff_metric(y_pred=preds, y=labels)
+
+                    # Print compact debug info for evaluation batches
+                    try:
+                        imgs_np = images.detach().cpu().numpy()
+                        labels_np = labels.detach().cpu().numpy()
+                        preds_np = preds.detach().cpu().numpy()
+                        print(
+                            f"[DEBUG] Eval {split} batch {idx} - images:{imgs_np.shape}, labels:{labels_np.shape}, preds:{preds_np.shape}"
+                        )
+                        print(
+                            f"[DEBUG] Eval {split} batch {idx} - unique labels: {np.unique(labels_np)}, unique preds: {np.unique(preds_np)}"
+                        )
+                        flat_labels = labels_np.flatten()
+                        flat_preds = preds_np.flatten()
+                        print(f"[DEBUG] sample labels[:20]: {flat_labels[:20]}")
+                        print(f"[DEBUG] sample preds[:20]: {flat_preds[:20]}")
+                    except Exception as e:
+                        print(f"[DEBUG] Failed to print eval batch {idx}: {e}")
 
             # Aggregate results with error handling
             if has_labels:
