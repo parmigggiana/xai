@@ -117,16 +117,16 @@ class MedicalSegmenter(nn.Module):
                 model.clipseg.load_state_dict(state_dict, strict=False)
 
             # Ensure CLIPSeg parameters are trainable (requires_grad=True)
-            try:
-                for name, param in model.clipseg.named_parameters():
-                    param.requires_grad = True
-                # Also ensure the head (prediction layers) are trainable
-                for name, param in model.head.named_parameters():
-                    param.requires_grad = True
-            except Exception:
+            #try:
+            #    for name, param in model.clipseg.named_parameters():
+            #        param.requires_grad = True
+            #    # Also ensure the head (prediction layers) are trainable
+            #    for name, param in model.head.named_parameters():
+            #        param.requires_grad = True
+            #except Exception:
                 # If the model structure differs, fall back to enabling all model params
-                for name, param in model.named_parameters():
-                    param.requires_grad = True
+            #    for name, param in model.named_parameters():
+            #        param.requires_grad = True
 
             self.encoder = model
             self.head = model.head

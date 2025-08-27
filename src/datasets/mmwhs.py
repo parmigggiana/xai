@@ -6,6 +6,8 @@ import torch
 from matplotlib import cm
 from monai.data import DataLoader, NibabelReader
 
+from monai.data.utils import pad_list_data_collate
+
 from src.datasets.common import BaseDataset
 from src.ImageDataset import ImageDataset
 
@@ -245,6 +247,7 @@ class MMWHS(BaseDataset):
             batch_size=batch_size,
             num_workers=num_workers,
             pin_memory=True,
+            collate_fn=pad_list_data_collate
         )
 
         self.val_loader = DataLoader(
@@ -253,6 +256,7 @@ class MMWHS(BaseDataset):
             batch_size=batch_size,
             num_workers=num_workers,
             pin_memory=True,
+            collate_fn=pad_list_data_collate
         )
 
         # For compatibility, create test_loader
@@ -262,6 +266,7 @@ class MMWHS(BaseDataset):
             batch_size=batch_size,
             num_workers=num_workers,
             pin_memory=True,
+            collate_fn=pad_list_data_collate
         )
 
         self.classnames = list(mmwhs_labels.values())
