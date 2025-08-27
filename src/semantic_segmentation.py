@@ -304,8 +304,11 @@ class MedicalSegmenter(nn.Module):
         if self.dataset is None:
             raise ValueError("Dataset must be provided to finetune the model")
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Force CPU execution and comment out CUDA selection to disable CUDA optimizations
+        device = torch.device("cpu")
         self.to(device)
+        # Previous line:
+        # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # torch.backends.cudnn.benchmark = True
 
         print(f"🚀 Starting training for {epochs} epochs")
@@ -462,10 +465,10 @@ class MedicalSegmenter(nn.Module):
                     if self.encoder_type == "swin_unetr" and labels.dim() == 4:
                         labels = labels.unsqueeze(1)
 
-                    with torch.amp.autocast(device.type):
-                        outputs = self.forward(images)
-                        loss_val = loss_function(outputs, labels)
-                        val_losses.append(loss_val.item())
+                    # Remove AMP autocast here as well
+                    outputs = self.forward(images)
+                    loss_val = loss_function(outputs, labels)
+                    val_losses.append(loss_val.item())
 
                     preds = torch.argmax(outputs, dim=1, keepdim=True)
                     dice_metric(y_pred=preds, y=labels)
@@ -527,7 +530,6 @@ class MedicalSegmenter(nn.Module):
 
     def _setup_training_components(self, learning_rate, weight_decay):
         """Setup loss function, metrics, optimizer, and scaler for training."""
-
         # Setup loss function (memory-efficient configuration)
         # Custom class weights: reduce background weight (assume background is excluded, so we add 1)
         class_weights = torch.ones(
@@ -552,8 +554,9 @@ class MedicalSegmenter(nn.Module):
             self.parameters(), lr=learning_rate, weight_decay=weight_decay
         )
 
-        # Setup gradient scaler for mixed precision
-        scaler = torch.amp.GradScaler(self.device.type)
+        # NOTE: AMP/GradScaler disabled to remove mixed-precision optimizations
+        # scaler = torch.amp.GradScaler(self.device.type)
+        scaler = None
 
         return loss_function, dice_metric, optimizer, scaler
 
@@ -572,32 +575,7 @@ class MedicalSegmenter(nn.Module):
         try:
 
             optimizer.zero_grad()
-            #DEBUG FOR MMWHS
             
-            # Compact debug: inspect incoming batch structure/types/shapes to diagnose collate issues
-            try:
-                print(f"[BATCH DEBUG] idx={batch_idx} type={type(batch)} len={len(batch) if hasattr(batch,'__len__') else 'N/A'}")
-                for i, elem in enumerate(batch):
-                    if i >= 8:
-                        print(f"  ... (and more elements, total {len(batch)})")
-                        break
-                    t_type = type(elem)
-                    # try to get shape info if available without forcing tensor operations
-                    shp = None
-                    try:
-                        shp = getattr(elem, "shape", None)
-                    except Exception:
-                        shp = None
-                    # detect MONAI MetaTensor-ish objects by presence of .meta attribute
-                    is_meta = hasattr(elem, "meta") or hasattr(elem, "applied_operations")
-                    print(f"  elem[{i}] -> type={t_type}, is_tensor={torch.is_tensor(elem) if hasattr(torch, 'is_tensor') else 'unknown'}, shape={shp}, is_meta={is_meta}")
-                    # if element is a tuple/list, show brief info for first child
-                    if isinstance(elem, (list, tuple)) and len(elem) > 0:
-                        first = elem[0]
-                        print(f"    sub0 -> type={type(first)}, shape={getattr(first, 'shape', None)}")
-            except Exception as e:
-                print(f"[BATCH DEBUG] failed to inspect batch: {e}")
-
             images = batch[0].to(device, non_blocking=True)
             labels = batch[1].to(device, non_blocking=True)
 
@@ -606,18 +584,11 @@ class MedicalSegmenter(nn.Module):
                 labels = labels.unsqueeze(1)
 
             # Apply dataset-specific label decoding if available
-            # if hasattr(self.dataset, "decode"):
-            #     labels = self.dataset.decode(labels)
+            # NOTE: dataset.decode commented out elsewhere; keep as-is
 
-            # Validate label range
-            # max_label = labels.max().item()
-            # if max_label >= self.num_classes:
-            #     labels = torch.clamp(labels, 0, self.num_classes - 1)
-
-            # Forward pass with mixed precision
-            with torch.amp.autocast(device.type):
-                outputs = self.forward(images)
-                loss = loss_function(outputs, labels)
+            # Forward pass WITHOUT AMP (mixed precision disabled)
+            outputs = self.forward(images)
+            loss = loss_function(outputs, labels)
 
             # Debug ogni 20 batch
             if batch_idx % 20 == 0:
@@ -628,37 +599,30 @@ class MedicalSegmenter(nn.Module):
                     f"[DEBUG] Outputs -> mean: {outputs.mean().item():.6f}, std: {outputs.std().item():.6f}"
                 )
 
-            # Backward pass with gradient scaling
-            if scaler is not None:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
+            # Backward pass (no GradScaler) and NO gradient norm clipping
+            loss.backward()
+            # Removed gradient clipping:
+            # torch.nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
+            optimizer.step()
 
-                # Debug dei gradienti
-                total_norm = 0
+            # Prepare debug info (compute grad norm without clipping if needed)
+            total_norm = None
+            try:
+                total_norm = 0.0
                 param_count = 0
                 for p in self.parameters():
                     if p.grad is not None:
                         param_norm = p.grad.data.norm(2)
                         total_norm += param_norm.item() ** 2
                         param_count += 1
-                total_norm = total_norm ** (1.0 / 2)
+                if param_count > 0:
+                    total_norm = total_norm ** (1.0 / 2)
+            except Exception:
+                total_norm = None
 
-                if batch_idx % 20 == 0:
-                    print(
-                        f"[DEBUG] Gradient norm: {total_norm:.8f} (params with grad: {param_count})"
-                    )
-
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
-                optimizer.step()
-
-            # Prepare debug info
             dbg = {
-                "grad_norm": float(total_norm) if "total_norm" in locals() else None,
+                "batch_idx": batch_idx,
+                "grad_norm": float(total_norm) if total_norm is not None else None,
                 "unique_labels": [
                     int(x) for x in np.unique(labels.detach().cpu().numpy()).tolist()
                 ],
@@ -670,8 +634,9 @@ class MedicalSegmenter(nn.Module):
             return outputs, loss.item(), True, dbg
         except torch.cuda.OutOfMemoryError:
             print(f"❌ OOM at batch {batch_idx}, clearing cache and continuing...")
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            # CUDA cache calls commented out per request to remove CUDA optimizations
+            # if torch.cuda.is_available():
+            #     torch.cuda.empty_cache()
             return None, 0.0, False, None
         # except Exception as e:
         #     print(f"⚠️ Error at batch {batch_idx}: {e}")
@@ -732,7 +697,8 @@ class MedicalSegmenter(nn.Module):
         Evaluate the model and return metrics on both train and test loaders.
         Memory-optimized version with aggressive memory management for large datasets like MMWHS.
         """
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Force CPU execution and disable CUDA/AMP synchronization
+        device = torch.device("cpu")
         self.eval()
         self.freeze()
 
@@ -745,10 +711,10 @@ class MedicalSegmenter(nn.Module):
         self.to(device)
 
         for split in ["train", "val", "test"]:
-            # Clear cache before each split
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
+            # Clear cache before each split - CUDA calls commented out
+            # if torch.cuda.is_available():
+            #     torch.cuda.empty_cache()
+            #     torch.cuda.synchronize()
             gc.collect()
 
             loader = getattr(self.dataset, f"{split}_loader", None)
@@ -756,34 +722,19 @@ class MedicalSegmenter(nn.Module):
             if loader is None:
                 continue
 
-            print(f"🔍 Evaluating {split} split...")
-
-            dice_metric.reset()
-            hausdorff_metric.reset()
-            has_labels = False
             with torch.no_grad():
-                # Print a compact summary of a few evaluation batches (images, preds, labels)
                 for idx, batch in enumerate(tqdm(loader, desc=f"Evaluating {split}")):
-                    images = batch[0].to(device, non_blocking=True)
+                    images = batch[0].to(device)
                     labels = batch[1] if len(batch) > 1 else None
 
                     if labels is None:
                         del images
                         continue
 
-                    labels = labels.to(device, non_blocking=True)
+                    labels = labels.to(device)
 
-                    # Ensure async transfers complete before proceeding
-                    if device.type == "cuda":
-                        torch.cuda.synchronize()
-
-                    # if hasattr(self.dataset, "decode"):
-                    #     labels = self.dataset.decode(labels)
-
-                    has_labels = True
-                    # For very large images, process with reduced precision
-                    with torch.amp.autocast(device.type):
-                        outputs = self(images)
+                    # Remove AMP autocast here as well
+                    outputs = self(images)
 
                     preds = torch.argmax(outputs, dim=1, keepdim=True)
 
