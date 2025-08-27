@@ -572,6 +572,31 @@ class MedicalSegmenter(nn.Module):
         try:
 
             optimizer.zero_grad()
+            #DEBUG FOR MMWHS
+            
+            # Compact debug: inspect incoming batch structure/types/shapes to diagnose collate issues
+            try:
+                print(f"[BATCH DEBUG] idx={batch_idx} type={type(batch)} len={len(batch) if hasattr(batch,'__len__') else 'N/A'}")
+                for i, elem in enumerate(batch):
+                    if i >= 8:
+                        print(f"  ... (and more elements, total {len(batch)})")
+                        break
+                    t_type = type(elem)
+                    # try to get shape info if available without forcing tensor operations
+                    shp = None
+                    try:
+                        shp = getattr(elem, "shape", None)
+                    except Exception:
+                        shp = None
+                    # detect MONAI MetaTensor-ish objects by presence of .meta attribute
+                    is_meta = hasattr(elem, "meta") or hasattr(elem, "applied_operations")
+                    print(f"  elem[{i}] -> type={t_type}, is_tensor={torch.is_tensor(elem) if hasattr(torch, 'is_tensor') else 'unknown'}, shape={shp}, is_meta={is_meta}")
+                    # if element is a tuple/list, show brief info for first child
+                    if isinstance(elem, (list, tuple)) and len(elem) > 0:
+                        first = elem[0]
+                        print(f"    sub0 -> type={type(first)}, shape={getattr(first, 'shape', None)}")
+            except Exception as e:
+                print(f"[BATCH DEBUG] failed to inspect batch: {e}")
 
             images = batch[0].to(device, non_blocking=True)
             labels = batch[1].to(device, non_blocking=True)
