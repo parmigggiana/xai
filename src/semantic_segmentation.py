@@ -579,15 +579,27 @@ class MedicalSegmenter(nn.Module):
             images = batch[0].to(device, non_blocking=True)
             labels = batch[1].to(device, non_blocking=True)
 
-            # If dataset provides a decode mapping (e.g. CHAOS/MMWHS), apply it here
+            # If dataset provides a decode mapping (e.g. CHAOS/MMWHS), apply it only when needed.
+            # Many preprocessing pipelines already decode; avoid double-decoding by checking dtype/range.
             if hasattr(self.dataset, "decode"):
                 try:
-                    labels = self.dataset.decode(labels)
+                    # If labels already look like class indices in [0, num_classes-1], skip decode.
+                    is_long_int = labels.dtype == torch.long
+                    max_val = int(labels.max().item()) if labels.numel() > 0 else 0
+                    if not is_long_int and max_val < self.num_classes:
+                        # float labels but already in class-range -> just cast to long
+                        labels = labels.long()
+                    elif is_long_int and max_val < self.num_classes:
+                        # already good
+                        pass
+                    else:
+                        # likely still encoded -> decode (ensure long)
+                        labels = self.dataset.decode(labels).long()
                 except Exception:
-                    pass
-
-            # Ensure labels are integer class indices for to_onehot_y=True
-            if not torch.is_floating_point(labels) or labels.dtype != torch.long:
+                    # fallback: cast to long
+                    labels = labels.long()
+            else:
+                # No dataset decode function: ensure integer class indices
                 labels = labels.long()
             
             # Ensure labels are in correct format [B, 1, D, H, W]
@@ -754,6 +766,20 @@ class MedicalSegmenter(nn.Module):
                         continue
 
                     labels = labels.to(device)
+                    # Same safe decode logic as in training to avoid double-decode
+                    if hasattr(self.dataset, "decode"):
+                        try:
+                            is_long_int = labels.dtype == torch.long
+                            max_val = int(labels.max().item()) if labels.numel() > 0 else 0
+                            if not is_long_int and max_val < self.num_classes:
+                                labels = labels.long()
+                            elif is_long_int and max_val < self.num_classes:
+                                pass
+                            else:
+                                labels = self.dataset.decode(labels).long()
+                        except Exception:
+                            labels = labels.long()
+
                     has_labels = True  # At least one batch had labels
 
                     # Remove AMP autocast here as well
