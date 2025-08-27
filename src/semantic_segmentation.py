@@ -530,7 +530,8 @@ class MedicalSegmenter(nn.Module):
         loss_function = DiceCELoss(
             include_background=True,
             to_onehot_y=True,
-            softmax=True,
+            # CLIPSeg returns per-class probabilities; do not apply softmax again
+            softmax=False,
             lambda_dice=0.7,
             lambda_ce=0.3,
             weight=class_weights,
@@ -582,6 +583,7 @@ class MedicalSegmenter(nn.Module):
 
             # Debug ogni 20 batch
             if batch_idx % 20 == 0:
+                print("labels dtype/min/max:", labels.dtype, labels.min().item(), labels.max().item())
                 uniq = np.unique(labels.detach().cpu().numpy())
                 print(f"[DEBUG] Batch {batch_idx} - Loss: {loss.item():.6f}")
                 print(f"[DEBUG] Unique labels: {uniq}")
@@ -589,7 +591,13 @@ class MedicalSegmenter(nn.Module):
                     f"[DEBUG] Outputs -> mean: {outputs.mean().item():.6f}, std: {outputs.std().item():.6f}"
                 )
                 print("Unique labels in batch:", torch.unique(labels))
-                print("Unique predictions in batch:", torch.unique(outputs))
+                # Convert to class indices for compact debug (choose argmax for multi-class)
+                try:
+                    preds_idx = torch.argmax(outputs, dim=1, keepdim=False)
+                    print("Unique prediction classes in batch:", torch.unique(preds_idx))
+                except Exception:
+                    # Fallback: show summary stats if argmax not applicable
+                    print("Unique predictions (summary):", torch.unique(outputs))
 
             # Backward pass (no GradScaler) and NO gradient norm clipping
             loss.backward()
