@@ -200,8 +200,8 @@ class CLIPSeg(nn.Module):
         avg_embedding = torch.stack(embeddings).mean(dim=0).to(image.device)
 
         # Run the segmentation forward pass WITH gradients enabled
-        pred = self.clipseg(image, conditional=avg_embedding)[0]
-        pred = torch.sigmoid(pred)
+        pred = self.clipseg(image, conditional=avg_embedding)[0] #logits
+        #pred = torch.sigmoid(pred)
 
         # Resize if needed
         if pred.shape[2:] != image.shape[2:]:

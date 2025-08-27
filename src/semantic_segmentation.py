@@ -535,12 +535,13 @@ class MedicalSegmenter(nn.Module):
             self.num_classes, dtype=torch.float32, device=self.device
         )
         #class_weights[0] = 0.1  # Reduce background weight (adjust as needed)
+        class_weights = torch.tensor([0.1] + [1.0]*(self.num_classes-1), device=self.device)
 
         # CLIPSeg produces sigmoids / probability-like outputs; do not apply softmax again.
         loss_function = DiceCELoss(
             include_background=True,
             to_onehot_y=True,
-            softmax=False,  # Changed: don't apply softmax to already-probabilistic outputs
+            softmax=True,  # True for logits input; False if already probabilities
             lambda_dice=0.7,
             lambda_ce=0.3,
             weight=class_weights,
