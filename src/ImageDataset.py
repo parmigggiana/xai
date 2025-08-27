@@ -226,7 +226,26 @@ class ImageDataset(Dataset, Randomizable):
             label = self.labels[index]
             if self.label_transform is not None:
                 label = apply_transform(self.label_transform, label, map_items=False)  # type: ignore
+        
+        # ------------------ CHANGED: ensure we return plain tensors, not MetaTensors ------------------
+        # Convert MONAI MetaTensor -> plain torch.Tensor to avoid inconsistent batched metadata
+        try:
+            if isinstance(img, MetaTensor):
+                # preserve meta dict separately but convert image to tensor
+                if hasattr(img, "meta") and meta_data is None:
+                    meta_data = dict(img.meta) if img.meta else None
+                img = img.as_tensor()
+        except Exception:
+            pass
 
+        try:
+            if seg is not None and isinstance(seg, MetaTensor):
+                if hasattr(seg, "meta") and seg_meta_data is None:
+                    seg_meta_data = dict(seg.meta) if seg.meta else None
+                seg = seg.as_tensor()
+        except Exception:
+            pass
+        
         # construct outputs
         data = [img]
         if seg is not None:
