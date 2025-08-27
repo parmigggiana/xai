@@ -196,6 +196,41 @@ class ImageDataset(Dataset, Randomizable):
                     seg.shape[-2:], dtype=np.int64
                 )
 
+        # ---- Normalize shapes and types to avoid collate errors ----
+        def _ensure_channel_first(arr):
+            # works for numpy arrays and torch tensors
+            if arr is None:
+                return None
+            if isinstance(arr, torch.Tensor):
+                a = arr
+                if a.ndim == 2:
+                    return a.unsqueeze(0)
+                # If last dim looks like channels (H,W,C), move it to front
+                if a.ndim == 3 and a.shape[0] not in (1, 3) and a.shape[-1] in (1, 3):
+                    return a.permute(2, 0, 1).contiguous()
+                return a
+            else:
+                a = np.asarray(arr)
+                if a.ndim == 2:
+                    return np.expand_dims(a, 0)
+                if a.ndim == 3 and a.shape[0] not in (1, 3) and a.shape[-1] in (1, 3):
+                    return np.transpose(a, (2, 0, 1)).copy()
+                return a
+
+        img = _ensure_channel_first(img)
+        if seg is not None:
+            seg = _ensure_channel_first(seg)
+
+        # ensure label is scalar / python type to avoid tensors with different shapes
+        if self.labels is not None:
+            label = self.labels[index]
+            # convert zero-dim numpy/torch to python scalar
+            if isinstance(label, np.ndarray) and label.shape == ():
+                label = label.item()
+            if isinstance(label, torch.Tensor) and label.dim() == 0:
+                label = label.item()
+        # ------------------------------------------------------------
+        
         # apply the transforms
         if self.transform is not None:
             if isinstance(self.transform, Randomizable):
@@ -227,24 +262,6 @@ class ImageDataset(Dataset, Randomizable):
             if self.label_transform is not None:
                 label = apply_transform(self.label_transform, label, map_items=False)  # type: ignore
         
-        # ------------------ CHANGED: ensure we return plain tensors, not MetaTensors ------------------
-        # Convert MONAI MetaTensor -> plain torch.Tensor to avoid inconsistent batched metadata
-        try:
-            if isinstance(img, MetaTensor):
-                # preserve meta dict separately but convert image to tensor
-                if hasattr(img, "meta") and meta_data is None:
-                    meta_data = dict(img.meta) if img.meta else None
-                img = img.as_tensor()
-        except Exception:
-            pass
-
-        try:
-            if seg is not None and isinstance(seg, MetaTensor):
-                if hasattr(seg, "meta") and seg_meta_data is None:
-                    seg_meta_data = dict(seg.meta) if seg.meta else None
-                seg = seg.as_tensor()
-        except Exception:
-            pass
         
         # construct outputs
         data = [img]
