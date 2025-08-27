@@ -598,6 +598,8 @@ class MedicalSegmenter(nn.Module):
                 print(
                     f"[DEBUG] Outputs -> mean: {outputs.mean().item():.6f}, std: {outputs.std().item():.6f}"
                 )
+                print("Unique labels in batch:", torch.unique(labels))
+                print("Unique predictions in batch:", torch.unique(outputs))
 
             # Backward pass (no GradScaler) and NO gradient norm clipping
             loss.backward()
