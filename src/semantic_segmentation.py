@@ -525,13 +525,12 @@ class MedicalSegmenter(nn.Module):
         class_weights = torch.ones(
             self.num_classes, dtype=torch.float32, device=self.device
         )
-        # class_weights[0] = 0.2  # Reduce background weight (adjust as needed)
+        class_weights[0] = 0.1  # Reduce background weight (adjust as needed)
 
         loss_function = DiceCELoss(
             include_background=True,
             to_onehot_y=True,
-            # CLIPSeg returns per-class probabilities; do not apply softmax again
-            softmax=False,
+            softmax=True,
             lambda_dice=0.7,
             lambda_ce=0.3,
             weight=class_weights,
