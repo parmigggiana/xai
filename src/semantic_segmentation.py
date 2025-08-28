@@ -117,14 +117,14 @@ class MedicalSegmenter(nn.Module):
                 model.clipseg.load_state_dict(state_dict, strict=False)
 
             # Ensure CLIPSeg parameters are trainable (requires_grad=True)
-            #try:
+            # try:
             #    for name, param in model.clipseg.named_parameters():
             #        param.requires_grad = True
             #    # Also ensure the head (prediction layers) are trainable
             #    for name, param in model.head.named_parameters():
             #        param.requires_grad = True
-            #except Exception:
-                # If the model structure differs, fall back to enabling all model params
+            # except Exception:
+            # If the model structure differs, fall back to enabling all model params
             #    for name, param in model.named_parameters():
             #        param.requires_grad = True
 
@@ -475,9 +475,13 @@ class MedicalSegmenter(nn.Module):
                     # Print or visualize debug info (limit verbose output)
                     if visualize_batches:
                         try:
-                            self._visualize_batch(images, preds, labels, title=f"Val batch {batch_idx}")
+                            self._visualize_batch(
+                                images, preds, labels, title=f"Val batch {batch_idx}"
+                            )
                         except Exception as e:
-                            print(f"[DEBUG] Visualization failed for val batch {batch_idx}: {e}")
+                            print(
+                                f"[DEBUG] Visualization failed for val batch {batch_idx}: {e}"
+                            )
                     else:
                         try:
                             imgs_np = images.detach().cpu().numpy()
@@ -534,8 +538,10 @@ class MedicalSegmenter(nn.Module):
         class_weights = torch.ones(
             self.num_classes, dtype=torch.float32, device=self.device
         )
-        #class_weights[0] = 0.1  # Reduce background weight (adjust as needed)
-        class_weights = torch.tensor([0.1] + [1.0]*(self.num_classes-1), device=self.device)
+        # class_weights[0] = 0.1  # Reduce background weight (adjust as needed)
+        class_weights = torch.tensor(
+            [0.1] + [1.0] * (self.num_classes - 1), device=self.device
+        )
 
         # CLIPSeg produces sigmoids / probability-like outputs; do not apply softmax again.
         loss_function = DiceCELoss(
@@ -576,33 +582,33 @@ class MedicalSegmenter(nn.Module):
         try:
 
             optimizer.zero_grad()
-            
+
             images = batch[0].to(device, non_blocking=True)
             labels = batch[1].to(device, non_blocking=True)
 
             # If dataset provides a decode mapping (e.g. CHAOS/MMWHS), apply it only when needed.
             # Many preprocessing pipelines already decode; avoid double-decoding by checking dtype/range.
-            if hasattr(self.dataset, "decode"):
-                try:
-                    # If labels already look like class indices in [0, num_classes-1], skip decode.
-                    is_long_int = labels.dtype == torch.long
-                    max_val = int(labels.max().item()) if labels.numel() > 0 else 0
-                    if not is_long_int and max_val < self.num_classes:
-                        # float labels but already in class-range -> just cast to long
-                        labels = labels.long()
-                    elif is_long_int and max_val < self.num_classes:
-                        # already good
-                        pass
-                    else:
-                        # likely still encoded -> decode (ensure long)
-                        labels = self.dataset.decode(labels).long()
-                except Exception:
-                    # fallback: cast to long
-                    labels = labels.long()
-            else:
-                # No dataset decode function: ensure integer class indices
-                labels = labels.long()
-            
+            # if hasattr(self.dataset, "decode"):
+            #     try:
+            #         # If labels already look like class indices in [0, num_classes-1], skip decode.
+            #         is_long_int = labels.dtype == torch.long
+            #         max_val = int(labels.max().item()) if labels.numel() > 0 else 0
+            #         if not is_long_int and max_val < self.num_classes:
+            #             # float labels but already in class-range -> just cast to long
+            #             labels = labels.long()
+            #         elif is_long_int and max_val < self.num_classes:
+            #             # already good
+            #             pass
+            #         else:
+            #             # likely still encoded -> decode (ensure long)
+            #             labels = self.dataset.decode(labels).long()
+            #     except Exception:
+            #         # fallback: cast to long
+            #         labels = labels.long()
+            # else:
+            #     # No dataset decode function: ensure integer class indices
+            #     labels = labels.long()
+
             # Ensure labels are in correct format [B, 1, D, H, W]
             if self.encoder_type == "swin_unetr" and labels.dim() == 4:  # [B, D, H, W]
                 labels = labels.unsqueeze(1)
@@ -616,7 +622,12 @@ class MedicalSegmenter(nn.Module):
 
             # Debug ogni 20 batch
             if batch_idx % 20 == 0:
-                print("labels dtype/min/max:", labels.dtype, labels.min().item(), labels.max().item())
+                print(
+                    "labels dtype/min/max:",
+                    labels.dtype,
+                    labels.min().item(),
+                    labels.max().item(),
+                )
                 uniq = np.unique(labels.detach().cpu().numpy())
                 print(f"[DEBUG] Batch {batch_idx} - Loss: {loss.item():.6f}")
                 print(f"[DEBUG] Unique labels: {uniq}")
@@ -627,7 +638,9 @@ class MedicalSegmenter(nn.Module):
                 # Convert to class indices for compact debug (choose argmax for multi-class)
                 try:
                     preds_idx = torch.argmax(outputs, dim=1, keepdim=False)
-                    print("Unique prediction classes in batch:", torch.unique(preds_idx))
+                    print(
+                        "Unique prediction classes in batch:", torch.unique(preds_idx)
+                    )
                 except Exception:
                     # Fallback: show summary stats if argmax not applicable
                     print("Unique predictions (summary):", torch.unique(outputs))
@@ -771,7 +784,9 @@ class MedicalSegmenter(nn.Module):
                     if hasattr(self.dataset, "decode"):
                         try:
                             is_long_int = labels.dtype == torch.long
-                            max_val = int(labels.max().item()) if labels.numel() > 0 else 0
+                            max_val = (
+                                int(labels.max().item()) if labels.numel() > 0 else 0
+                            )
                             if not is_long_int and max_val < self.num_classes:
                                 labels = labels.long()
                             elif is_long_int and max_val < self.num_classes:
@@ -795,9 +810,13 @@ class MedicalSegmenter(nn.Module):
                     # Visualize or print compact debug info for evaluation batches
                     if visualize:
                         try:
-                            self._visualize_batch(images, preds, labels, title=f"Eval {split} batch {idx}")
+                            self._visualize_batch(
+                                images, preds, labels, title=f"Eval {split} batch {idx}"
+                            )
                         except Exception as e:
-                            print(f"[DEBUG] Visualization failed for eval {split} batch {idx}: {e}")
+                            print(
+                                f"[DEBUG] Visualization failed for eval {split} batch {idx}: {e}"
+                            )
                     else:
                         try:
                             imgs_np = images.detach().cpu().numpy()
