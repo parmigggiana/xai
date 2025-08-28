@@ -769,6 +769,8 @@ class MedicalSegmenter(nn.Module):
                 continue
 
             has_labels = False  # Track if any labels were processed
+            # Hold a single batch to visualize after finishing the split
+            viz_images = viz_preds = viz_labels = None
 
             with torch.no_grad():
                 for idx, batch in enumerate(tqdm(loader, desc=f"Evaluating {split}")):
@@ -807,17 +809,17 @@ class MedicalSegmenter(nn.Module):
                     dice_metric(y_pred=preds, y=labels)
                     hausdorff_metric(y_pred=preds, y=labels)
 
-                    # Visualize or print compact debug info for evaluation batches
-                    if visualize:
+                    # Store a single batch for visualization at the end of the split
+                    if visualize and viz_images is None:
                         try:
-                            self._visualize_batch(
-                                images, preds, labels, title=f"Eval {split} batch {idx}"
-                            )
-                        except Exception as e:
-                            print(
-                                f"[DEBUG] Visualization failed for eval {split} batch {idx}: {e}"
-                            )
-                    else:
+                            viz_images = images[:1].detach().cpu()
+                            viz_preds = preds[:1].detach().cpu()
+                            viz_labels = labels[:1].detach().cpu()
+                        except Exception:
+                            viz_images = viz_preds = viz_labels = None
+
+                    # Print compact debug info per batch when not visualizing
+                    if not visualize:
                         try:
                             imgs_np = images.detach().cpu().numpy()
                             labels_np = labels.detach().cpu().numpy()
@@ -844,6 +846,19 @@ class MedicalSegmenter(nn.Module):
                     print(
                         f"✅ {split} - Dice: {dice_score:.4f}, Hausdorff: {hausdorff_dist:.4f}"
                     )
+                    # Perform the visualization once per split at the end
+                    if visualize and viz_images is not None:
+                        try:
+                            self._visualize_batch(
+                                viz_images,
+                                viz_preds,
+                                viz_labels,
+                                title=f"Eval {split} summary",
+                            )
+                        except Exception as e:
+                            print(
+                                f"[DEBUG] Final visualization failed for {split}: {e}"
+                            )
                 except (ValueError, RuntimeError) as e:
                     print(f"⚠️ Error aggregating metrics for {split}: {e}")
                     results[split] = {"dice": None, "hausdorff": None}
