@@ -54,5 +54,16 @@
             "hausdorff": 19.796443939208984
         },
         "test": {}
+    },
+    "CHAOS_MR_2d_finetuned": {
+        "train": {
+            "dice": 0.7645870447158813,
+            "hausdorff": Infinity
+        },
+        "val": {
+            "dice": 0.7529453039169312,
+            "hausdorff": Infinity
+        },
+        "test": {}
     }
 }
