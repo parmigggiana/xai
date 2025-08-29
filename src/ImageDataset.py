@@ -129,6 +129,7 @@ class ImageDataset(Dataset, Randomizable):
         # load data and optionally meta
         if self.image_only:
             img = self.loader(image_file)
+            print(f"[DEBUG] index: {index}, image_file: {image_file}, img mean: {np.mean(img):.4f}, img shape: {img.shape}")
             if seg_file is not None:
                 seg = self.seg_loader(seg_file)
         else:
@@ -242,3 +243,4 @@ class ImageDataset(Dataset, Randomizable):
             return data[0]
         # use tuple instead of list as the default collate_fn callback of MONAI DataLoader flattens nested lists
         return tuple(data)
+
