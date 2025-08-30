@@ -540,7 +540,7 @@ class MedicalSegmenter(nn.Module):
         )
         # class_weights[0] = 0.1  # Reduce background weight (adjust as needed)
         class_weights = torch.tensor(
-            [0.3] + [1.0] * (self.num_classes - 1), device=self.device
+            [0.4] + [1.0] * (self.num_classes - 1), device=self.device
         )
 
         # CLIPSeg produces sigmoids / probability-like outputs; do not apply softmax again.
