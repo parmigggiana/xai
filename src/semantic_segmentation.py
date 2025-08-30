@@ -304,10 +304,12 @@ class MedicalSegmenter(nn.Module):
             raise ValueError("Dataset must be provided to finetune the model")
 
         # Force CPU execution and comment out CUDA selection to disable CUDA optimizations
-        device = torch.device("cpu")
+        #device = torch.device("cpu")
+        
+        
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.to(device)
-        # Previous line:
-        # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         # torch.backends.cudnn.benchmark = True
 
         print(f"🚀 Starting training for {epochs} epochs")
