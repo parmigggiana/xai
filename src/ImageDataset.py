@@ -142,7 +142,7 @@ class ImageDataset(Dataset, Randomizable):
                         if attribute not in seg_meta_data:
                             seg_meta_data[attribute] = meta_data[attribute]
         
-        print(f"[DEBUG] index: {index}, image_file: {image_file}, img mean: {np.mean(img):.4f}, img shape: {img.shape}")                    
+        #print(f"[DEBUG] index: {index}, image_file: {image_file}, img mean: {np.mean(img):.4f}, img shape: {img.shape}")                    
 
         # Helper to derive 2D affine from 3D affine for slice k (slice along last axis)
         def build_2d_affine_from_3d(affine3d: np.ndarray, k: int) -> np.ndarray:
