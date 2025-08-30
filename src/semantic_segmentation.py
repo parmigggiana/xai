@@ -305,11 +305,12 @@ class MedicalSegmenter(nn.Module):
 
         # Force CPU execution and comment out CUDA selection to disable CUDA optimizations
         #device = torch.device("cpu")
-        
-        
+
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.to(device)
 
+        # Previous line:
+        
         # torch.backends.cudnn.benchmark = True
 
         print(f"🚀 Starting training for {epochs} epochs")
@@ -746,7 +747,13 @@ class MedicalSegmenter(nn.Module):
         Memory-optimized version with aggressive memory management for large datasets like MMWHS.
         """
         # Force CPU execution and disable CUDA/AMP synchronization
-        device = torch.device("cpu")
+        #device = torch.device("cpu")
+
+        
+        #Use CUDA if available
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.to(device)
+
         self.eval()
         self.freeze()
 
