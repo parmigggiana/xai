@@ -57,13 +57,38 @@
     },
     "CHAOS_MR_2d_finetuned": {
         "train": {
-            "dice": 0.7645870447158813,
+            "dice": 0.586517333984375,
             "hausdorff": Infinity
         },
         "val": {
-            "dice": 0.7529453039169312,
+            "dice": 0.5759464502334595,
             "hausdorff": Infinity
         },
         "test": {}
+    },
+    "CHAOS_CT_2d_finetuned": {
+        "train": {
+            "dice": 0.8621236085891724,
+            "hausdorff": Infinity
+        },
+        "val": {
+            "dice": 0.8608932495117188,
+            "hausdorff": Infinity
+        },
+        "test": {}
+    },
+    "MMWHS_MR_2d_finetuned": {
+        "train": {
+            "dice": 0.449769526720047,
+            "hausdorff": Infinity
+        },
+        "val": {
+            "dice": 0.44316980242729187,
+            "hausdorff": Infinity
+        },
+        "test": {
+            "dice": 0.4423142075538635,
+            "hausdorff": Infinity
+        }
     }
 }

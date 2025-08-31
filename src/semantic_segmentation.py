@@ -828,23 +828,23 @@ class MedicalSegmenter(nn.Module):
                             viz_images = viz_preds = viz_labels = None
 
                     # Print compact debug info per batch when not visualizing
-                    if not visualize:
-                        try:
-                            imgs_np = images.detach().cpu().numpy()
-                            labels_np = labels.detach().cpu().numpy()
-                            preds_np = preds.detach().cpu().numpy()
-                            print(
-                                f"[DEBUG] Eval {split} batch {idx} - images:{imgs_np.shape}, labels:{labels_np.shape}, preds:{preds_np.shape}"
-                            )
-                            print(
-                                f"[DEBUG] Eval {split} batch {idx} - unique labels: {np.unique(labels_np)}, unique preds: {np.unique(preds_np)}"
-                            )
-                            flat_labels = labels_np.flatten()
-                            flat_preds = preds_np.flatten()
-                            print(f"[DEBUG] sample labels[:20]: {flat_labels[:20]}")
-                            print(f"[DEBUG] sample preds[:20]: {flat_preds[:20]}")
-                        except Exception as e:
-                            print(f"[DEBUG] Failed to print eval batch {idx}: {e}")
+                    # if not visualize:
+                    #     try:
+                    #         imgs_np = images.detach().cpu().numpy()
+                    #         labels_np = labels.detach().cpu().numpy()
+                    #         preds_np = preds.detach().cpu().numpy()
+                    #         print(
+                    #             f"[DEBUG] Eval {split} batch {idx} - images:{imgs_np.shape}, labels:{labels_np.shape}, preds:{preds_np.shape}"
+                    #         )
+                    #         print(
+                    #             f"[DEBUG] Eval {split} batch {idx} - unique labels: {np.unique(labels_np)}, unique preds: {np.unique(preds_np)}"
+                    #         )
+                    #         flat_labels = labels_np.flatten()
+                    #         flat_preds = preds_np.flatten()
+                    #         print(f"[DEBUG] sample labels[:20]: {flat_labels[:20]}")
+                    #         print(f"[DEBUG] sample preds[:20]: {flat_preds[:20]}")
+                    #     except Exception as e:
+                    #         print(f"[DEBUG] Failed to print eval batch {idx}: {e}")
 
             # Aggregate results with error handling
             if has_labels:
