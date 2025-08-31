@@ -298,7 +298,7 @@ class MedicalSegmenter(nn.Module):
         weight_decay: float = 1e-5,
         save_best: bool = True,
         max_grad_norm: float = 5.0,  # previously 1.0
-        visualize_batches: bool = True,
+        visualize_batches: bool = False,
     ):
         if self.dataset is None:
             raise ValueError("Dataset must be provided to finetune the model")
@@ -490,17 +490,17 @@ class MedicalSegmenter(nn.Module):
                             imgs_np = images.detach().cpu().numpy()
                             labels_np = labels.detach().cpu().numpy()
                             preds_np = preds.detach().cpu().numpy()
-                            print(
-                                f"[DEBUG] Val batch {batch_idx} - images:{imgs_np.shape}, labels:{labels_np.shape}, preds:{preds_np.shape}"
-                            )
-                            print(
-                                f"[DEBUG] Val batch {batch_idx} - unique labels: {np.unique(labels_np)}, unique preds: {np.unique(preds_np)}"
-                            )
+                            # print(
+                            #     f"[DEBUG] Val batch {batch_idx} - images:{imgs_np.shape}, labels:{labels_np.shape}, preds:{preds_np.shape}"
+                            # )
+                            # print(
+                            #     f"[DEBUG] Val batch {batch_idx} - unique labels: {np.unique(labels_np)}, unique preds: {np.unique(preds_np)}"
+                            # )
                             # print small sample to inspect values without flooding
-                            flat_labels = labels_np.flatten()
-                            flat_preds = preds_np.flatten()
-                            print(f"[DEBUG] sample labels[:20]: {flat_labels[:20]}")
-                            print(f"[DEBUG] sample preds[:20]: {flat_preds[:20]}")
+                            # flat_labels = labels_np.flatten()
+                            # flat_preds = preds_np.flatten()
+                            # print(f"[DEBUG] sample labels[:20]: {flat_labels[:20]}")
+                            # print(f"[DEBUG] sample preds[:20]: {flat_preds[:20]}")
                         except Exception as e:
                             print(f"[DEBUG] Failed to print val batch {batch_idx}: {e}")
 
@@ -624,29 +624,29 @@ class MedicalSegmenter(nn.Module):
             loss = loss_function(outputs, labels)
 
             # Debug ogni 20 batch
-            if batch_idx % 20 == 0:
-                print(
-                    "labels dtype/min/max:",
-                    labels.dtype,
-                    labels.min().item(),
-                    labels.max().item(),
-                )
-                uniq = np.unique(labels.detach().cpu().numpy())
-                print(f"[DEBUG] Batch {batch_idx} - Loss: {loss.item():.6f}")
-                print(f"[DEBUG] Unique labels: {uniq}")
-                print(
-                    f"[DEBUG] Outputs -> mean: {outputs.mean().item():.6f}, std: {outputs.std().item():.6f}"
-                )
-                print("Unique labels in batch:", torch.unique(labels))
-                # Convert to class indices for compact debug (choose argmax for multi-class)
-                try:
-                    preds_idx = torch.argmax(outputs, dim=1, keepdim=False)
-                    print(
-                        "Unique prediction classes in batch:", torch.unique(preds_idx)
-                    )
-                except Exception:
-                    # Fallback: show summary stats if argmax not applicable
-                    print("Unique predictions (summary):", torch.unique(outputs))
+            # if batch_idx % 20 == 0:
+            #     print(
+            #         "labels dtype/min/max:",
+            #         labels.dtype,
+            #         labels.min().item(),
+            #         labels.max().item(),
+            #     )
+            #     uniq = np.unique(labels.detach().cpu().numpy())
+            #     print(f"[DEBUG] Batch {batch_idx} - Loss: {loss.item():.6f}")
+            #     print(f"[DEBUG] Unique labels: {uniq}")
+            #     print(
+            #         f"[DEBUG] Outputs -> mean: {outputs.mean().item():.6f}, std: {outputs.std().item():.6f}"
+            #     )
+            #     print("Unique labels in batch:", torch.unique(labels))
+            #     # Convert to class indices for compact debug (choose argmax for multi-class)
+            #     try:
+            #         preds_idx = torch.argmax(outputs, dim=1, keepdim=False)
+            #         print(
+            #             "Unique prediction classes in batch:", torch.unique(preds_idx)
+            #         )
+            #     except Exception:
+            #         # Fallback: show summary stats if argmax not applicable
+            #         print("Unique predictions (summary):", torch.unique(outputs))
 
             # Backward pass (no GradScaler) and NO gradient norm clipping
             loss.backward()
