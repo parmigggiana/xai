@@ -309,9 +309,12 @@ class MedicalSegmenter(nn.Module):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.to(device)
 
-        # Previous line:
-        
-        # torch.backends.cudnn.benchmark = True
+        # Enable CuDNN autotuner when using CUDA to speed up convolutions for varying input sizes
+        try:
+            if device.type == "cuda":
+                torch.backends.cudnn.benchmark = True
+        except Exception:
+            pass
 
         print(f"🚀 Starting training for {epochs} epochs")
         print(f"   Device: {device}")
@@ -467,9 +470,14 @@ class MedicalSegmenter(nn.Module):
                     if self.encoder_type == "swin_unetr" and labels.dim() == 4:
                         labels = labels.unsqueeze(1)
 
-                    # Remove AMP autocast here as well
-                    outputs = self.forward(images)
-                    loss_val = loss_function(outputs, labels)
+                    # Use mixed precision for validation forward for speed when CUDA is available
+                    if device.type == "cuda":
+                        with torch.amp.autocast("cuda"):
+                            outputs = self.forward(images)
+                            loss_val = loss_function(outputs, labels)
+                    else:
+                        outputs = self.forward(images)
+                        loss_val = loss_function(outputs, labels)
                     val_losses.append(loss_val.item())
 
                     preds = torch.argmax(outputs, dim=1, keepdim=True)
@@ -579,9 +587,14 @@ class MedicalSegmenter(nn.Module):
             self.parameters(), lr=learning_rate, weight_decay=weight_decay
         )
 
-        # NOTE: AMP/GradScaler disabled to remove mixed-precision optimizations
-        # scaler = torch.amp.GradScaler(self.device.type)
-        scaler = None
+        # Enable AMP GradScaler on CUDA
+        if self.device.type == "cuda":
+            try:
+                scaler = torch.amp.GradScaler("cuda")
+            except Exception:
+                scaler = None
+        else:
+            scaler = None
 
         return loss_function, dice_metric, optimizer, scaler
 
@@ -634,9 +647,14 @@ class MedicalSegmenter(nn.Module):
             # Apply dataset-specific label decoding if available
             # NOTE: dataset.decode commented out elsewhere; keep as-is
 
-            # Forward pass WITHOUT AMP (mixed precision disabled)
-            outputs = self.forward(images)
-            loss = loss_function(outputs, labels)
+            # Forward pass with AMP (if enabled)
+            if scaler is not None and device.type == "cuda":
+                with torch.amp.autocast("cuda"):
+                    outputs = self.forward(images)
+                    loss = loss_function(outputs, labels)
+            else:
+                outputs = self.forward(images)
+                loss = loss_function(outputs, labels)
 
             # Debug ogni 20 batch
             # if batch_idx % 20 == 0:
@@ -663,11 +681,29 @@ class MedicalSegmenter(nn.Module):
             #         # Fallback: show summary stats if argmax not applicable
             #         print("Unique predictions (summary):", torch.unique(outputs))
 
-            # Backward pass (no GradScaler) and NO gradient norm clipping
-            loss.backward()
-            # Removed gradient clipping:
-            # torch.nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
-            optimizer.step()
+            # Backward/step with GradScaler when available
+            if scaler is not None and device.type == "cuda":
+                scaler.scale(loss).backward()
+                # Unscale before optional gradient clipping
+                try:
+                    scaler.unscale_(optimizer)
+                except Exception:
+                    pass
+                if max_grad_norm and max_grad_norm > 0:
+                    try:
+                        torch.nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
+                    except Exception:
+                        pass
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                if max_grad_norm and max_grad_norm > 0:
+                    try:
+                        torch.nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
+                    except Exception:
+                        pass
+                optimizer.step()
 
             # Prepare debug info (compute grad norm without clipping if needed)
             total_norm = None
@@ -827,8 +863,12 @@ class MedicalSegmenter(nn.Module):
 
                     has_labels = True  # At least one batch had labels
 
-                    # Remove AMP autocast here as well
-                    outputs = self(images)
+                    # Use mixed precision during evaluation for speed
+                    if device.type == "cuda":
+                        with torch.amp.autocast("cuda"):
+                            outputs = self(images)
+                    else:
+                        outputs = self(images)
 
                     preds = torch.argmax(outputs, dim=1, keepdim=True)
 
