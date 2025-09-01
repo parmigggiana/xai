@@ -241,33 +241,48 @@ class MMWHS(BaseDataset):
         )
 
         # Create DataLoaders
-        self.train_loader = DataLoader(
-            self.train_dataset,
-            shuffle=True,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            pin_memory=True,
-            collate_fn=simple_collate_fn,
-        )
+        train_loader_kwargs = {
+            "shuffle": True,
+            "batch_size": batch_size,
+            "num_workers": num_workers,
+            "pin_memory": True if torch.cuda.is_available() else False,
+            "collate_fn": simple_collate_fn,
+        }
+        if num_workers and num_workers > 0:
+            train_loader_kwargs.update({
+                "persistent_workers": True,
+                "prefetch_factor": 2,
+            })
+        self.train_loader = DataLoader(self.train_dataset, **train_loader_kwargs)
 
-        self.val_loader = DataLoader(
-            self.val_dataset,
-            shuffle=False,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            pin_memory=True,
-            collate_fn=simple_collate_fn,
-        )
+        val_loader_kwargs = {
+            "shuffle": False,
+            "batch_size": batch_size,
+            "num_workers": num_workers,
+            "pin_memory": True if torch.cuda.is_available() else False,
+            "collate_fn": simple_collate_fn,
+        }
+        if num_workers and num_workers > 0:
+            val_loader_kwargs.update({
+                "persistent_workers": True,
+                "prefetch_factor": 2,
+            })
+        self.val_loader = DataLoader(self.val_dataset, **val_loader_kwargs)
 
         # For compatibility, create test_loader
-        self.test_loader = DataLoader(
-            self.test_dataset,
-            shuffle=False,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            pin_memory=True,
-            collate_fn=simple_collate_fn,
-        )
+        test_loader_kwargs = {
+            "shuffle": False,
+            "batch_size": batch_size,
+            "num_workers": num_workers,
+            "pin_memory": True if torch.cuda.is_available() else False,
+            "collate_fn": simple_collate_fn,
+        }
+        if num_workers and num_workers > 0:
+            test_loader_kwargs.update({
+                "persistent_workers": True,
+                "prefetch_factor": 2,
+            })
+        self.test_loader = DataLoader(self.test_dataset, **test_loader_kwargs)
 
         self.classnames = list(mmwhs_labels.values())
         self.num_classes = len(mmwhs_labels)

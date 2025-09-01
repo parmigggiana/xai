@@ -16,6 +16,9 @@ This file is based on ImageDataset from MONAI, modified to support different ima
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from collections import OrderedDict
+import os
+import copy
 from typing import Any
 
 import numpy as np
@@ -102,6 +105,52 @@ class ImageDataset(Dataset, Randomizable):
         self.set_random_state(seed=get_seed())
         self._seed = 0  # transform synchronization seed
 
+        # Detect slice mode (files provided as (path, slice_idx)) and initialize small LRU caches
+        self._slice_mode = any(isinstance(x, tuple) and len(x) == 2 for x in self.image_files)
+        # Allow tuning via env var; default to a conservative cache size to limit RAM
+        self._cache_capacity = int(os.environ.get("XAI_VOLUME_CACHE_CAPACITY", "3"))
+        self._img_volume_cache: "OrderedDict[str, tuple]" = OrderedDict()
+        self._seg_volume_cache: "OrderedDict[str, tuple]" = OrderedDict()
+
+    def _get_cached_volume(self, kind: str, file_path: str):
+        """Return (array, metadata) for file_path using an LRU cache when in slice mode.
+        kind: 'img' or 'seg'
+        """
+        if not self._slice_mode:
+            # No caching necessary
+            if kind == "img":
+                return self.loader(file_path) if not self.image_only else (self.loader(file_path), None)
+            else:
+                return self.seg_loader(file_path) if not self.image_only else (self.seg_loader(file_path), None)
+
+        cache = self._img_volume_cache if kind == "img" else self._seg_volume_cache
+        loader = self.loader if kind == "img" else self.seg_loader
+
+        # Normalize key to string path
+        key = str(file_path)
+        if key in cache:
+            val = cache.pop(key)
+            cache[key] = val  # move to end (most-recent)
+            # Defensive copy of metadata dict to avoid in-place mutations downstream
+            arr, meta = val
+            meta_copy = copy.deepcopy(meta) if isinstance(meta, dict) else meta
+            return arr, meta_copy
+
+        # Miss: load once and cache
+        if self.image_only:
+            arr = loader(file_path)
+            meta = None
+        else:
+            arr, meta = loader(file_path)
+
+        cache[key] = (arr, meta)
+        # Evict least-recently-used if over capacity
+        if self._cache_capacity > 0 and len(cache) > self._cache_capacity:
+            cache.popitem(last=False)
+
+        meta_copy = copy.deepcopy(meta) if isinstance(meta, dict) else meta
+        return arr, meta_copy
+
     def __len__(self) -> int:
         return len(self.image_files)
 
@@ -126,21 +175,31 @@ class ImageDataset(Dataset, Randomizable):
         if seg_file is not None and isinstance(seg_file, tuple) and len(seg_file) == 2:
             seg_file, seg_slice_idx = seg_file
 
-        # load data and optionally meta
-        if self.image_only:
-            img = self.loader(image_file)
+        # load data and optionally meta (with per-volume caching for slice mode)
+        if image_slice_idx is not None:
+            # Use cached volume loading for images (and seg if present)
+            img, meta_data = self._get_cached_volume("img", image_file)
             if seg_file is not None:
-                seg = self.seg_loader(seg_file)
-        else:
-            img, meta_data = self.loader(image_file)
-            if seg_file is not None:
-                seg, seg_meta_data = self.seg_loader(seg_file)
-
-                # Copy relevant spatial metadata from image to segmentation
-                if meta_data and seg_meta_data:
+                seg, seg_meta_data = self._get_cached_volume("seg", seg_file)
+                # Copy relevant spatial metadata from image to segmentation (non-destructive)
+                if isinstance(meta_data, dict) and isinstance(seg_meta_data, dict):
                     for attribute in meta_data:
-                        if attribute not in seg_meta_data:
-                            seg_meta_data[attribute] = meta_data[attribute]
+                        seg_meta_data.setdefault(attribute, meta_data[attribute])
+        else:
+            # Fallback: default loader path (no caching)
+            if self.image_only:
+                img = self.loader(image_file)
+                if seg_file is not None:
+                    seg = self.seg_loader(seg_file)
+            else:
+                img, meta_data = self.loader(image_file)
+                if seg_file is not None:
+                    seg, seg_meta_data = self.seg_loader(seg_file)
+                    # Copy relevant spatial metadata from image to segmentation
+                    if meta_data and seg_meta_data:
+                        for attribute in meta_data:
+                            if attribute not in seg_meta_data:
+                                seg_meta_data[attribute] = meta_data[attribute]
         
         #print(f"[DEBUG] index: {index}, image_file: {image_file}, img mean: {np.mean(img):.4f}, img shape: {img.shape}")                    
 

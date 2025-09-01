@@ -90,5 +90,27 @@
             "dice": 0.4423142075538635,
             "hausdorff": Infinity
         }
+    },
+    "CHAOS_MR_adaptation": {
+        "train": {
+            "dice": 0.012953350320458412,
+            "hausdorff": 42.46600341796875
+        },
+        "val": {
+            "dice": 0.01134856790304184,
+            "hausdorff": 42.383506774902344
+        },
+        "test": {}
+    },
+    "CHAOS_CT_adaptation": {
+        "train": {
+            "dice": 0.0015150923281908035,
+            "hausdorff": 44.01298904418945
+        },
+        "val": {
+            "dice": 0.0013500716304406524,
+            "hausdorff": 44.29617691040039
+        },
+        "test": {}
     }
 }
