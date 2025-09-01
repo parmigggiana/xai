@@ -48,6 +48,7 @@ class PyTorchMMWHS(ImageDataset):
         transform: Optional[Callable] = None,
         seg_transform: Optional[Callable] = None,
         slice_2d: bool = False,
+        **image_dataset_kwargs,
     ) -> None:
         domain = domain.lower()
         assert domain in ["ct", "mr"], "Domain must be 'CT' or 'MR'."
@@ -88,6 +89,7 @@ class PyTorchMMWHS(ImageDataset):
             transform=transform,
             reader=NibabelReader(),
             seg_transform=seg_transform,
+            **image_dataset_kwargs,
         )
 
     def _load_all_file_lists(self):

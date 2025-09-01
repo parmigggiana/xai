@@ -53,6 +53,7 @@ class PyTorchCHAOS(ImageDataset):
         transform: Optional[Callable] = None,
         seg_transform: Optional[Callable] = None,
         liver_only: bool = False,
+        **image_dataset_kwargs,
     ) -> None:
         domain = domain.upper()
         assert domain in ["MRI", "MR", "CT"], "Domain must be 'MRI', 'MR', or 'CT'."
@@ -89,6 +90,7 @@ class PyTorchCHAOS(ImageDataset):
             seg_transform=seg_transform,
             reader=ITKReader2D() if slice_2d else ITKReader(),  # Use our fixed reader
             seg_reader=PILReader() if slice_2d else VolumetricPNGReader(),
+            **image_dataset_kwargs,
         )
 
     def _load_all_file_lists(self):

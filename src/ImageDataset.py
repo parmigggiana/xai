@@ -49,6 +49,8 @@ class ImageDataset(MonaiDataset, Randomizable):
         dtype: DtypeLike = np.float32,
         reader: ImageReader | str | None = None,
         seg_reader: ImageReader | str | None = None,
+        cache_max_items: int | None = None,
+        enable_cache: bool | None = None,
         *args,
         **kwargs,
     ) -> None:
@@ -100,8 +102,11 @@ class ImageDataset(MonaiDataset, Randomizable):
         self._seed = 0
 
         # Simple in-memory LRU caches for loaded images and segmentations
-        self._enable_cache = True
-        self._cache_max_items = 96
+        self._enable_cache = True if (enable_cache is None) else bool(enable_cache)
+        # default to 96 if not provided
+        self._cache_max_items = (
+            int(cache_max_items) if (cache_max_items is not None) else 96
+        )
         self._img_cache = OrderedDict()
         self._seg_cache = OrderedDict()
 
