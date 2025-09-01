@@ -473,7 +473,22 @@ class MedicalSegmenter(nn.Module):
                     val_losses.append(loss_val.item())
 
                     preds = torch.argmax(outputs, dim=1, keepdim=True)
-                    dice_metric(y_pred=preds, y=labels)
+
+                    # Convert to one-hot for metrics (C channels)
+                    try:
+                        def _to_onehot(x: torch.Tensor, num_classes: int) -> torch.Tensor:
+                            x = x.squeeze(1).long()
+                            oh = F.one_hot(x, num_classes=num_classes).movedim(-1, 1).float()
+                            return oh
+
+                        preds_oh = _to_onehot(preds, self.num_classes)
+                        labels_oh = _to_onehot(labels, self.num_classes)
+                    except Exception:
+                        # Fallback: best-effort binary foreground vs background
+                        preds_oh = (preds > 0).float()
+                        labels_oh = (labels > 0).float()
+
+                    dice_metric(y_pred=preds_oh, y=labels_oh)
 
                     # Print or visualize debug info (limit verbose output)
                     if visualize_batches:
@@ -758,8 +773,11 @@ class MedicalSegmenter(nn.Module):
         self.freeze()
 
         dice_metric = DiceMetric(include_background=False, reduction="mean")
+        # Use HD95 and collect raw values so we can ignore inf/NaN from empty masks
         hausdorff_metric = HausdorffDistanceMetric(
-            include_background=False, reduction="mean"
+            include_background=False,
+            reduction="none",
+            percentile=95,
         )
 
         results = {}
@@ -814,9 +832,22 @@ class MedicalSegmenter(nn.Module):
 
                     preds = torch.argmax(outputs, dim=1, keepdim=True)
 
-                    # Compute metrics
-                    dice_metric(y_pred=preds, y=labels)
-                    hausdorff_metric(y_pred=preds, y=labels)
+                    # Convert to one-hot for metrics
+                    def _to_onehot(x: torch.Tensor, num_classes: int) -> torch.Tensor:
+                        x = x.squeeze(1).long()
+                        oh = F.one_hot(x, num_classes=num_classes).movedim(-1, 1).float()
+                        return oh
+
+                    try:
+                        preds_oh = _to_onehot(preds, self.num_classes)
+                        labels_oh = _to_onehot(labels, self.num_classes)
+                    except Exception:
+                        preds_oh = (preds > 0).float()
+                        labels_oh = (labels > 0).float()
+
+                    # Compute metrics on one-hot masks
+                    dice_metric(y_pred=preds_oh, y=labels_oh)
+                    hausdorff_metric(y_pred=preds_oh, y=labels_oh)
 
                     # Store a single batch for visualization at the end of the split
                     if visualize and viz_images is None:
@@ -850,7 +881,18 @@ class MedicalSegmenter(nn.Module):
             if has_labels:
                 try:
                     dice_score = dice_metric.aggregate().item()
-                    hausdorff_dist = hausdorff_metric.aggregate().item()
+                    # Robust aggregation: ignore inf/NaN HD values (e.g., empty gt/pred for a class)
+                    hd_vals = hausdorff_metric.aggregate()
+                    if hasattr(hd_vals, "numel"):
+                        mask = torch.isfinite(hd_vals)
+                        if mask.any():
+                            hausdorff_dist = hd_vals[mask].mean().item()
+                        else:
+                            hausdorff_dist = float("nan")
+                    else:
+                        # Fallback if aggregate returned a scalar
+                        hausdorff_dist = float(hd_vals)
+
                     results[split] = {"dice": dice_score, "hausdorff": hausdorff_dist}
                     print(
                         f"✅ {split} - Dice: {dice_score:.4f}, Hausdorff: {hausdorff_dist:.4f}"
