@@ -299,6 +299,7 @@ class MedicalSegmenter(nn.Module):
         save_best: bool = True,
         max_grad_norm: float = 5.0,  # previously 1.0
         visualize_batches: bool = False,
+        early_stop_patience: int = 5,
     ):
         if self.dataset is None:
             raise ValueError("Dataset must be provided to finetune the model")
@@ -359,6 +360,9 @@ class MedicalSegmenter(nn.Module):
 
         best_val_dice = 0.0
         best_model_state = None
+        # Early stopping state (track best by validation loss)
+        best_val_loss = float("inf")
+        epochs_no_improve = 0
 
         for epoch in range(epochs):
             print(f"\n📖 Epoch {epoch + 1}/{epochs}")
@@ -549,6 +553,21 @@ class MedicalSegmenter(nn.Module):
                     k: v.cpu().clone() for k, v in self.state_dict().items()
                 }
                 print(f"   ✅ New best Val Dice: {best_val_dice:.4f}")
+
+            # Early stopping check on validation loss
+            if epoch_val_loss < best_val_loss - 1e-6:
+                best_val_loss = epoch_val_loss
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
+                print(
+                    f"   ⏳ No Val Loss improvement: {epochs_no_improve}/{early_stop_patience}"
+                )
+                if epochs_no_improve >= early_stop_patience:
+                    print(
+                        f"Early stopping triggered: no Val Loss improvement for {early_stop_patience} epochs."
+                    )
+                    break
 
         if save_best and best_model_state is not None:
             best_model_state = {k: v.to(device) for k, v in best_model_state.items()}
