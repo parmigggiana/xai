@@ -1,4 +1,5 @@
 import gc
+import contextlib
 import os
 import zipfile
 from pathlib import Path
@@ -19,6 +20,7 @@ from monai.networks.nets import SwinUNETR
 from tqdm import tqdm
 
 from src.CLIPSeg import CLIPSeg
+from src.profiling import cprofile_ctx, torch_profiler_ctx, timer
 
 
 class MedicalSegmenter(nn.Module):
@@ -300,6 +302,8 @@ class MedicalSegmenter(nn.Module):
         max_grad_norm: float = 5.0,  # previously 1.0
         visualize_batches: bool = False,
         early_stop_patience: int = 5,
+        profile: bool | str = False,  # False | 'cprofile' | 'torch'
+        profile_dir: str = "./outputs/profiling",
     ):
         if self.dataset is None:
             raise ValueError("Dataset must be provided to finetune the model")
@@ -364,210 +368,223 @@ class MedicalSegmenter(nn.Module):
         best_val_loss = float("inf")
         epochs_no_improve = 0
 
-        for epoch in range(epochs):
-            print(f"\n📖 Epoch {epoch + 1}/{epochs}")
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            self.train()
-            train_losses = []
-
-            # Debug: snapshot tracked param norms before epoch
-            pre_norms = {n: p.detach().float().norm().item() for n, p in tracked}
-            # Debug: epoch aggregates
-            epoch_unique_labels = set()
-            grad_nonzero_batches = 0
-            batch_count = 0
-
-            # Debug: print current LR(s)
-            try:
-                lrs = [pg.get("lr", None) for pg in optimizer.param_groups]
-                print(
-                    f"   LR(s): {', '.join(f'{lr:.6e}' for lr in lrs if lr is not None)}"
+        # Optional profilers
+        prof_cm = (
+            cprofile_ctx("train", out_dir=profile_dir)
+            if profile == "cprofile"
+            else (
+                torch_profiler_ctx(
+                    name="train",
+                    out_dir=profile_dir,
+                    wait=1,
+                    warmup=1,
+                    active=5,
                 )
-            except Exception:
-                pass
+                if profile == "torch"
+                else contextlib.nullcontext()
+            )
+        )
 
-            train_pbar = tqdm(self.dataset.train_loader, desc="Training")
-            for batch_idx, batch in enumerate(train_pbar):
-                outputs, loss_value, success, dbg = self._process_training_batch(
-                    batch,
-                    device,
-                    loss_function,
-                    optimizer,
-                    scaler,
-                    max_grad_norm,
-                    batch_idx,
-                )
+        with prof_cm as prof:
+            for epoch in range(epochs):
+                print(f"\n📖 Epoch {epoch + 1}/{epochs}")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
-                if success:
-                    train_losses.append(loss_value)
-                    avg_loss = np.mean(train_losses[-3:])
-                    train_pbar.set_postfix({"Loss": f"{avg_loss:.4f}"})
+                self.train()
+                train_losses = []
 
-                    # Update epoch-level debug stats
-                    batch_count += 1
-                    if dbg is not None:
-                        if "unique_labels" in dbg:
-                            try:
-                                epoch_unique_labels.update(
-                                    dbg["unique_labels"]
-                                )  # list of ints
-                            except Exception:
-                                pass
-                        if "grad_norm" in dbg and dbg["grad_norm"] is not None:
-                            if dbg["grad_norm"] > 0:
-                                grad_nonzero_batches += 1
+                # Debug: snapshot tracked param norms before epoch
+                pre_norms = {n: p.detach().float().norm().item() for n, p in tracked}
+                # Debug: epoch aggregates
+                epoch_unique_labels = set()
+                grad_nonzero_batches = 0
+                batch_count = 0
 
-            if train_losses:
-                epoch_train_loss = float(np.mean(train_losses))
-                history["train_loss"].append(epoch_train_loss)
-                print(f"Epoch {epoch+1} - Train Loss: {epoch_train_loss:.4f}")
-
-            # Debug: parameter update magnitudes on tracked params
-            post_norms = {n: p.detach().float().norm().item() for n, p in tracked}
-            if tracked:
-                print("   Param norm deltas (after epoch):")
-                for n in pre_norms:
-                    delta = post_norms[n] - pre_norms[n]
-                    print(
-                        f"     {n}: Δnorm={delta:+.6e} (before={pre_norms[n]:.6e}, after={post_norms[n]:.6e})"
-                    )
-
-            # Debug: epoch gradient non-zero ratio and label coverage
-            if batch_count > 0:
-                ratio = grad_nonzero_batches / batch_count
-                print(
-                    f"   Grad non-zero in batches: {grad_nonzero_batches}/{batch_count} ({ratio:.1%})"
-                )
-            if epoch_unique_labels:
+                # Debug: print current LR(s)
                 try:
+                    lrs = [pg.get("lr", None) for pg in optimizer.param_groups]
                     print(
-                        f"   Labels seen this epoch: {sorted(list(epoch_unique_labels))}"
+                        f"   LR(s): {', '.join(f'{lr:.6e}' for lr in lrs if lr is not None)}"
                     )
                 except Exception:
                     pass
 
-            # Debug: AMP scaler
-            try:
-                cur_scale = scaler.get_scale() if scaler is not None else None
-                if cur_scale is not None:
-                    print(f"   GradScaler scale: {cur_scale}")
-            except Exception:
-                pass
+                train_pbar = tqdm(self.dataset.train_loader, desc="Training")
+                for batch_idx, batch in enumerate(train_pbar):
+                    with timer(f"batch {batch_idx}"):
+                        outputs, loss_value, success, dbg = self._process_training_batch(
+                            batch,
+                            device,
+                            loss_function,
+                            optimizer,
+                            scaler,
+                            max_grad_norm,
+                            batch_idx,
+                        )
 
-            self.eval()
-            val_losses = []
-            epoch_val_dice = 0.0
+                    if success:
+                        train_losses.append(loss_value)
+                        avg_loss = np.mean(train_losses[-3:])
+                        train_pbar.set_postfix({"Loss": f"{avg_loss:.4f}"})
 
-            with torch.no_grad():
-                # Print a compact summary of a few validation batches (images, preds, labels)
-                for batch_idx, batch in enumerate(
-                    tqdm(self.dataset.val_loader, desc="Validating")
-                ):
-                    images = batch[0].to(device, non_blocking=True)
-                    labels = batch[1].to(device, non_blocking=True)
+                        # Update epoch-level debug stats
+                        batch_count += 1
+                        if dbg is not None:
+                            if "unique_labels" in dbg:
+                                try:
+                                    epoch_unique_labels.update(
+                                        dbg["unique_labels"]
+                                    )  # list of ints
+                                except Exception:
+                                    pass
+                            if "grad_norm" in dbg and dbg["grad_norm"] is not None:
+                                if dbg["grad_norm"] > 0:
+                                    grad_nonzero_batches += 1
 
-                    if device.type == "cuda":
-                        torch.cuda.synchronize()
+                if train_losses:
+                    epoch_train_loss = float(np.mean(train_losses))
+                    history["train_loss"].append(epoch_train_loss)
+                    print(f"Epoch {epoch+1} - Train Loss: {epoch_train_loss:.4f}")
 
-                    if self.encoder_type == "swin_unetr" and labels.dim() == 4:
-                        labels = labels.unsqueeze(1)
+                # Debug: parameter update magnitudes on tracked params
+                post_norms = {n: p.detach().float().norm().item() for n, p in tracked}
+                if tracked:
+                    print("   Param norm deltas (after epoch):")
+                    for n in pre_norms:
+                        delta = post_norms[n] - pre_norms[n]
+                        print(
+                            f"     {n}: Δnorm={delta:+.6e} (before={pre_norms[n]:.6e}, after={post_norms[n]:.6e})"
+                        )
 
-                    # Use mixed precision for validation forward for speed when CUDA is available
-                    if device.type == "cuda":
-                        with torch.amp.autocast("cuda"):
+                # Debug: epoch gradient non-zero ratio and label coverage
+                if batch_count > 0:
+                    ratio = grad_nonzero_batches / batch_count
+                    print(
+                        f"   Grad non-zero in batches: {grad_nonzero_batches}/{batch_count} ({ratio:.1%})"
+                    )
+                if epoch_unique_labels:
+                    try:
+                        print(
+                            f"   Labels seen this epoch: {sorted(list(epoch_unique_labels))}"
+                        )
+                    except Exception:
+                        pass
+
+                # Debug: AMP scaler
+                try:
+                    cur_scale = scaler.get_scale() if scaler is not None else None
+                    if cur_scale is not None:
+                        print(f"   GradScaler scale: {cur_scale}")
+                except Exception:
+                    pass
+
+                self.eval()
+                val_losses = []
+                epoch_val_dice = 0.0
+
+                with torch.no_grad():
+                    # Print a compact summary of a few validation batches (images, preds, labels)
+                    for batch_idx, batch in enumerate(
+                        tqdm(self.dataset.val_loader, desc="Validating")
+                    ):
+                        if profile == "torch" and prof is not None:
+                            try:
+                                prof.step()
+                            except Exception:
+                                pass
+                        images = batch[0].to(device, non_blocking=True)
+                        labels = batch[1].to(device, non_blocking=True)
+
+                        if device.type == "cuda":
+                            torch.cuda.synchronize()
+
+                        if self.encoder_type == "swin_unetr" and labels.dim() == 4:
+                            labels = labels.unsqueeze(1)
+
+                        # Use mixed precision for validation forward for speed when CUDA is available
+                        if device.type == "cuda":
+                            with torch.amp.autocast("cuda"):
+                                outputs = self.forward(images)
+                                loss_val = loss_function(outputs, labels)
+                        else:
                             outputs = self.forward(images)
                             loss_val = loss_function(outputs, labels)
-                    else:
-                        outputs = self.forward(images)
-                        loss_val = loss_function(outputs, labels)
-                    val_losses.append(loss_val.item())
+                        val_losses.append(loss_val.item())
 
-                    preds = torch.argmax(outputs, dim=1, keepdim=True)
+                        preds = torch.argmax(outputs, dim=1, keepdim=True)
 
-                    # Convert to one-hot for metrics (C channels)
-                    try:
-                        def _to_onehot(x: torch.Tensor, num_classes: int) -> torch.Tensor:
-                            x = x.squeeze(1).long()
-                            oh = F.one_hot(x, num_classes=num_classes).movedim(-1, 1).float()
-                            return oh
-
-                        preds_oh = _to_onehot(preds, self.num_classes)
-                        labels_oh = _to_onehot(labels, self.num_classes)
-                    except Exception:
-                        # Fallback: best-effort binary foreground vs background
-                        preds_oh = (preds > 0).float()
-                        labels_oh = (labels > 0).float()
-
-                    dice_metric(y_pred=preds_oh, y=labels_oh)
-
-                    # Print or visualize debug info (limit verbose output)
-                    if visualize_batches:
+                        # Convert to one-hot for metrics (C channels)
                         try:
-                            self._visualize_batch(
-                                images, preds, labels, title=f"Val batch {batch_idx}"
-                            )
-                        except Exception as e:
-                            print(
-                                f"[DEBUG] Visualization failed for val batch {batch_idx}: {e}"
-                            )
+                            def _to_onehot(x: torch.Tensor, num_classes: int) -> torch.Tensor:
+                                x = x.squeeze(1).long()
+                                oh = F.one_hot(x, num_classes=num_classes).movedim(-1, 1).float()
+                                return oh
+
+                            preds_oh = _to_onehot(preds, self.num_classes)
+                            labels_oh = _to_onehot(labels, self.num_classes)
+                        except Exception:
+                            # Fallback: best-effort binary foreground vs background
+                            preds_oh = (preds > 0).float()
+                            labels_oh = (labels > 0).float()
+
+                        dice_metric(y_pred=preds_oh, y=labels_oh)
+
+                        # Print or visualize debug info (limit verbose output)
+                        if visualize_batches:
+                            try:
+                                self._visualize_batch(
+                                    images, preds, labels, title=f"Val batch {batch_idx}"
+                                )
+                            except Exception as e:
+                                print(
+                                    f"[DEBUG] Visualization failed for val batch {batch_idx}: {e}"
+                                )
+                        else:
+                            try:
+                                imgs_np = images.detach().cpu().numpy()
+                                labels_np = labels.detach().cpu().numpy()
+                                preds_np = preds.detach().cpu().numpy()
+                            except Exception as e:
+                                print(f"[DEBUG] Failed to print val batch {batch_idx}: {e}")
+
+                    epoch_val_loss = float(np.mean(val_losses)) if val_losses else 0.0
+                    dice_result = dice_metric.aggregate()
+                    if isinstance(dice_result, tuple):
+                        epoch_val_dice = dice_result[0].mean().item()
+                    elif hasattr(dice_result, "numel") and dice_result.numel() > 1:
+                        epoch_val_dice = dice_result.mean().item()
                     else:
-                        try:
-                            imgs_np = images.detach().cpu().numpy()
-                            labels_np = labels.detach().cpu().numpy()
-                            preds_np = preds.detach().cpu().numpy()
-                            # print(
-                            #     f"[DEBUG] Val batch {batch_idx} - images:{imgs_np.shape}, labels:{labels_np.shape}, preds:{preds_np.shape}"
-                            # )
-                            # print(
-                            #     f"[DEBUG] Val batch {batch_idx} - unique labels: {np.unique(labels_np)}, unique preds: {np.unique(preds_np)}"
-                            # )
-                            # print small sample to inspect values without flooding
-                            # flat_labels = labels_np.flatten()
-                            # flat_preds = preds_np.flatten()
-                            # print(f"[DEBUG] sample labels[:20]: {flat_labels[:20]}")
-                            # print(f"[DEBUG] sample preds[:20]: {flat_preds[:20]}")
-                        except Exception as e:
-                            print(f"[DEBUG] Failed to print val batch {batch_idx}: {e}")
+                        epoch_val_dice = float(dice_result)
+                    dice_metric.reset()
 
-                epoch_val_loss = float(np.mean(val_losses)) if val_losses else 0.0
-                dice_result = dice_metric.aggregate()
-                if isinstance(dice_result, tuple):
-                    epoch_val_dice = dice_result[0].mean().item()
-                elif hasattr(dice_result, "numel") and dice_result.numel() > 1:
-                    epoch_val_dice = dice_result.mean().item()
-                else:
-                    epoch_val_dice = float(dice_result)
-                dice_metric.reset()
-
-            history["val_loss"].append(epoch_val_loss)
-            history["val_dice"].append(epoch_val_dice)
-            print(
-                f"Epoch {epoch+1} - Val Loss: {epoch_val_loss:.4f}, Val Dice: {epoch_val_dice:.4f}"
-            )
-
-            if save_best and epoch_val_dice > best_val_dice:
-                best_val_dice = epoch_val_dice
-                best_model_state = {
-                    k: v.cpu().clone() for k, v in self.state_dict().items()
-                }
-                print(f"   ✅ New best Val Dice: {best_val_dice:.4f}")
-
-            # Early stopping check on validation loss
-            if epoch_val_loss < best_val_loss - 1e-6:
-                best_val_loss = epoch_val_loss
-                epochs_no_improve = 0
-            else:
-                epochs_no_improve += 1
+                history["val_loss"].append(epoch_val_loss)
+                history["val_dice"].append(epoch_val_dice)
                 print(
-                    f"   ⏳ No Val Loss improvement: {epochs_no_improve}/{early_stop_patience}"
+                    f"Epoch {epoch+1} - Val Loss: {epoch_val_loss:.4f}, Val Dice: {epoch_val_dice:.4f}"
                 )
-                if epochs_no_improve >= early_stop_patience:
+
+                if save_best and epoch_val_dice > best_val_dice:
+                    best_val_dice = epoch_val_dice
+                    best_model_state = {
+                        k: v.cpu().clone() for k, v in self.state_dict().items()
+                    }
+                    print(f"   ✅ New best Val Dice: {best_val_dice:.4f}")
+
+                # Early stopping check on validation loss
+                if epoch_val_loss < best_val_loss - 1e-6:
+                    best_val_loss = epoch_val_loss
+                    epochs_no_improve = 0
+                else:
+                    epochs_no_improve += 1
                     print(
-                        f"Early stopping triggered: no Val Loss improvement for {early_stop_patience} epochs."
+                        f"   ⏳ No Val Loss improvement: {epochs_no_improve}/{early_stop_patience}"
                     )
-                    break
+                    if epochs_no_improve >= early_stop_patience:
+                        print(
+                            f"Early stopping triggered: no Val Loss improvement for {early_stop_patience} epochs."
+                        )
+                        break
 
         if save_best and best_model_state is not None:
             best_model_state = {k: v.to(device) for k, v in best_model_state.items()}
@@ -811,16 +828,12 @@ class MedicalSegmenter(nn.Module):
         plt.tight_layout()
         plt.show()
 
-    def evaluate(self, visualize: bool = False):
+    def evaluate(self, visualize: bool = False, profile: bool | str = False, profile_dir: str = "./outputs/profiling"):
         """
         Evaluate the model and return metrics on both train and test loaders.
         Memory-optimized version with aggressive memory management for large datasets like MMWHS.
         """
-        # Force CPU execution and disable CUDA/AMP synchronization
-        #device = torch.device("cpu")
-
-        
-        #Use CUDA if available
+        # Use CUDA if available
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.to(device)
 
@@ -839,10 +852,7 @@ class MedicalSegmenter(nn.Module):
         self.to(device)
 
         for split in ["train", "val", "test"]:
-            # Clear cache before each split - CUDA calls commented out
-            # if torch.cuda.is_available():
-            #     torch.cuda.empty_cache()
-            #     torch.cuda.synchronize()
+            # Clear cache before each split
             gc.collect()
 
             loader = getattr(self.dataset, f"{split}_loader", None)
@@ -854,8 +864,20 @@ class MedicalSegmenter(nn.Module):
             # Hold a single batch to visualize after finishing the split
             viz_images = viz_preds = viz_labels = None
 
-            with torch.no_grad():
+            # Optional torch profiler per split
+            prof_cm = (
+                torch_profiler_ctx(name=f"eval-{split}", out_dir=profile_dir, wait=1, warmup=1, active=5)
+                if profile == "torch"
+                else contextlib.nullcontext()
+            )
+
+            with torch.no_grad(), prof_cm as prof:
                 for idx, batch in enumerate(tqdm(loader, desc=f"Evaluating {split}")):
+                    if profile == "torch" and prof is not None:
+                        try:
+                            prof.step()
+                        except Exception:
+                            pass
                     images = batch[0].to(device)
                     labels = batch[1] if len(batch) > 1 else None
 
@@ -868,9 +890,7 @@ class MedicalSegmenter(nn.Module):
                     if hasattr(self.dataset, "decode"):
                         try:
                             is_long_int = labels.dtype == torch.long
-                            max_val = (
-                                int(labels.max().item()) if labels.numel() > 0 else 0
-                            )
+                            max_val = int(labels.max().item()) if labels.numel() > 0 else 0
                             if not is_long_int and max_val < self.num_classes:
                                 labels = labels.long()
                             elif is_long_int and max_val < self.num_classes:
@@ -917,25 +937,6 @@ class MedicalSegmenter(nn.Module):
                         except Exception:
                             viz_images = viz_preds = viz_labels = None
 
-                    # Print compact debug info per batch when not visualizing
-                    # if not visualize:
-                    #     try:
-                    #         imgs_np = images.detach().cpu().numpy()
-                    #         labels_np = labels.detach().cpu().numpy()
-                    #         preds_np = preds.detach().cpu().numpy()
-                    #         print(
-                    #             f"[DEBUG] Eval {split} batch {idx} - images:{imgs_np.shape}, labels:{labels_np.shape}, preds:{preds_np.shape}"
-                    #         )
-                    #         print(
-                    #             f"[DEBUG] Eval {split} batch {idx} - unique labels: {np.unique(labels_np)}, unique preds: {np.unique(preds_np)}"
-                    #         )
-                    #         flat_labels = labels_np.flatten()
-                    #         flat_preds = preds_np.flatten()
-                    #         print(f"[DEBUG] sample labels[:20]: {flat_labels[:20]}")
-                    #         print(f"[DEBUG] sample preds[:20]: {flat_preds[:20]}")
-                    #     except Exception as e:
-                    #         print(f"[DEBUG] Failed to print eval batch {idx}: {e}")
-
             # Aggregate results with error handling
             if has_labels:
                 try:
@@ -953,9 +954,7 @@ class MedicalSegmenter(nn.Module):
                         hausdorff_dist = float(hd_vals)
 
                     results[split] = {"dice": dice_score, "hausdorff": hausdorff_dist}
-                    print(
-                        f"✅ {split} - Dice: {dice_score:.4f}, Hausdorff: {hausdorff_dist:.4f}"
-                    )
+                    print(f"✅ {split} - Dice: {dice_score:.4f}, Hausdorff: {hausdorff_dist:.4f}")
                     # Perform the visualization once per split at the end
                     if visualize and viz_images is not None:
                         try:
@@ -966,9 +965,7 @@ class MedicalSegmenter(nn.Module):
                                 title=f"Eval {split} summary",
                             )
                         except Exception as e:
-                            print(
-                                f"[DEBUG] Final visualization failed for {split}: {e}"
-                            )
+                            print(f"[DEBUG] Final visualization failed for {split}: {e}")
                 except (ValueError, RuntimeError) as e:
                     print(f"⚠️ Error aggregating metrics for {split}: {e}")
                     results[split] = {"dice": None, "hausdorff": None}

@@ -20,6 +20,10 @@ from collections import OrderedDict
 import os
 import copy
 from typing import Any
+from pathlib import Path
+import time
+import json
+import datetime as _dt
 
 import numpy as np
 import torch
@@ -112,6 +116,47 @@ class ImageDataset(Dataset, Randomizable):
         self._img_volume_cache: "OrderedDict[str, tuple]" = OrderedDict()
         self._seg_volume_cache: "OrderedDict[str, tuple]" = OrderedDict()
 
+    # -------------------- Profiling helpers (opt-in via env vars) --------------------
+    @staticmethod
+    def _profiling_enabled() -> bool:
+        try:
+            val = os.environ.get("XAI_PROFILE_PREPROCESS", "")
+            return str(val).lower() in ("1", "true", "yes", "y", "on")
+        except Exception:
+            return False
+
+    @staticmethod
+    def _profiling_dir() -> Path:
+        try:
+            d = os.environ.get("XAI_PROFILE_DIR", "./outputs/profiling")
+        except Exception:
+            d = "./outputs/profiling"
+        p = Path(d)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    @staticmethod
+    def _profiling_log(event: dict) -> None:
+        """Append a JSONL event to a per-process file. Safe for multi-worker DataLoader.
+
+        Control via env vars:
+          - XAI_PROFILE_PREPROCESS=1 to enable
+          - XAI_PROFILE_DIR to choose output folder
+        """
+        if not ImageDataset._profiling_enabled():
+            return
+        try:
+            out = ImageDataset._profiling_dir() / f"preprocess-{os.getpid()}.jsonl"
+            # enrich with timestamp and pid
+            event = dict(event)  # shallow copy
+            event.setdefault("ts", _dt.datetime.now().isoformat(timespec="seconds"))
+            event.setdefault("pid", os.getpid())
+            with open(out, "a", encoding="utf-8") as f:
+                f.write(json.dumps(event, default=str) + "\n")
+        except Exception:
+            # Swallow any logging errors to avoid breaking data loading
+            pass
+
     def _get_cached_volume(self, kind: str, file_path: str):
         """Return (array, metadata) for file_path using an LRU cache when in slice mode.
         kind: 'img' or 'seg'
@@ -161,6 +206,9 @@ class ImageDataset(Dataset, Randomizable):
         self.randomize()
         meta_data, seg_meta_data, seg, label = None, None, None, None
 
+        # timing accumulators
+        _t_load_img = _t_load_seg = _t_xform_img = _t_xform_seg = None
+
         # Handle slice tuples for 2D slice loading
         image_file = self.image_files[index]
         seg_file = self.seg_files[index] if self.seg_files is not None else None
@@ -178,9 +226,13 @@ class ImageDataset(Dataset, Randomizable):
         # load data and optionally meta (with per-volume caching for slice mode)
         if image_slice_idx is not None:
             # Use cached volume loading for images (and seg if present)
+            _t0 = time.perf_counter()
             img, meta_data = self._get_cached_volume("img", image_file)
+            _t_load_img = time.perf_counter() - _t0
             if seg_file is not None:
+                _t1 = time.perf_counter()
                 seg, seg_meta_data = self._get_cached_volume("seg", seg_file)
+                _t_load_seg = time.perf_counter() - _t1
                 # Copy relevant spatial metadata from image to segmentation (non-destructive)
                 if isinstance(meta_data, dict) and isinstance(seg_meta_data, dict):
                     for attribute in meta_data:
@@ -188,13 +240,21 @@ class ImageDataset(Dataset, Randomizable):
         else:
             # Fallback: default loader path (no caching)
             if self.image_only:
+                _t0 = time.perf_counter()
                 img = self.loader(image_file)
+                _t_load_img = time.perf_counter() - _t0
                 if seg_file is not None:
+                    _t1 = time.perf_counter()
                     seg = self.seg_loader(seg_file)
+                    _t_load_seg = time.perf_counter() - _t1
             else:
+                _t0 = time.perf_counter()
                 img, meta_data = self.loader(image_file)
+                _t_load_img = time.perf_counter() - _t0
                 if seg_file is not None:
+                    _t1 = time.perf_counter()
                     seg, seg_meta_data = self.seg_loader(seg_file)
+                    _t_load_seg = time.perf_counter() - _t1
                     # Copy relevant spatial metadata from image to segmentation
                     if meta_data and seg_meta_data:
                         for attribute in meta_data:
@@ -262,17 +322,20 @@ class ImageDataset(Dataset, Randomizable):
             if isinstance(self.transform, Randomizable):
                 self.transform.set_random_state(seed=self._seed)
 
+            _t0 = time.perf_counter()
             if self.transform_with_metadata:
                 img, meta_data = apply_transform(
                     self.transform, (img, meta_data), map_items=False, unpack_items=True
                 )
             else:
                 img = apply_transform(self.transform, img, map_items=False)
+            _t_xform_img = time.perf_counter() - _t0
 
         if self.seg_files is not None and self.seg_transform is not None:
             if isinstance(self.seg_transform, Randomizable):
                 self.seg_transform.set_random_state(seed=self._seed)
 
+            _t0 = time.perf_counter()
             if self.transform_with_metadata:
                 seg, seg_meta_data = apply_transform(
                     self.seg_transform,
@@ -282,6 +345,7 @@ class ImageDataset(Dataset, Randomizable):
                 )
             else:
                 seg = apply_transform(self.seg_transform, seg, map_items=False)
+            _t_xform_seg = time.perf_counter() - _t0
 
         if self.labels is not None:
             label = self.labels[index]
@@ -301,6 +365,40 @@ class ImageDataset(Dataset, Randomizable):
             data.append(seg_meta_data)
         if len(data) == 1:
             return data[0]
+        # Optional: emit a profiling event for this item
+        try:
+            if ImageDataset._profiling_enabled():
+                def _shape_dtype(x):
+                    try:
+                        s = tuple(x.shape) if hasattr(x, "shape") else None
+                        dt = str(getattr(x, "dtype", None))
+                        return s, dt
+                    except Exception:
+                        return None, None
+
+                img_shape, img_dtype = _shape_dtype(data[0]) if len(data) >= 1 else (None, None)
+                seg_shape, seg_dtype = _shape_dtype(data[1]) if len(data) >= 2 else (None, None)
+                ImageDataset._profiling_log(
+                    {
+                        "event": "preprocess",
+                        "index": int(index),
+                        "image_file": str(image_file),
+                        "seg_file": str(seg_file) if seg_file is not None else None,
+                        "slice_idx": int(image_slice_idx) if image_slice_idx is not None else None,
+                        "seg_slice_idx": int(seg_slice_idx) if seg_slice_idx is not None else None,
+                        "t_load_img_s": float(_t_load_img) if _t_load_img is not None else None,
+                        "t_load_seg_s": float(_t_load_seg) if _t_load_seg is not None else None,
+                        "t_xform_img_s": float(_t_xform_img) if _t_xform_img is not None else None,
+                        "t_xform_seg_s": float(_t_xform_seg) if _t_xform_seg is not None else None,
+                        "img_shape": img_shape,
+                        "img_dtype": img_dtype,
+                        "seg_shape": seg_shape,
+                        "seg_dtype": seg_dtype,
+                    }
+                )
+        except Exception:
+            pass
+
         # use tuple instead of list as the default collate_fn callback of MONAI DataLoader flattens nested lists
         return tuple(data)
        
