@@ -7,6 +7,10 @@ class ITKReader2D(ITKReader):
     Fixes the issue where single DICOM slices get depth dimension of size 0.
     """
 
+    def __init__(self, *args, **kwargs):
+        # kwargs.setdefault("affine_lps_to_ras", False) # Keep raw storage orientation to match CHAOS PNG masks (no LPS->RAS reorientation)
+        super().__init__(*args, **kwargs)
+
     def __call__(self, filename, reader=None):
         """Read image and ensure proper 2D slice dimensions."""
         # Use parent ITKReader to load the image

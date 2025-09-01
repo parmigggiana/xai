@@ -5,8 +5,8 @@ import numpy as np
 import torch
 from matplotlib import cm
 from monai.data import DataLoader, NibabelReader
+from src.utils import meta_safe_collate
 
-from src.utils import simple_collate_fn
 
 from src.datasets.common import BaseDataset
 from src.ImageDataset import ImageDataset
@@ -88,8 +88,6 @@ class PyTorchMMWHS(ImageDataset):
             transform=transform,
             reader=NibabelReader(),
             seg_transform=seg_transform,
-            image_only=False,
-            transform_with_metadata=True,
         )
 
     def _load_all_file_lists(self):
@@ -179,11 +177,11 @@ class MMWHS(BaseDataset):
             abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6
         ), "Train, validation, and test ratios must sum to 1.0"
 
-        # Create a full dataset to get all available samples
+        # Create a full dataset to discover samples
         full_dataset = PyTorchMMWHS(
             base_path=str(location),
             domain=domain,
-            indices=None,  # Get all samples
+            indices=None,
             transform=transform,
             seg_transform=seg_transform,
             slice_2d=slice_2d,
@@ -212,7 +210,7 @@ class MMWHS(BaseDataset):
         val_indices = indices[train_size : train_size + val_size]
         test_indices = indices[train_size + val_size :]
 
-        # Create datasets for each split
+        # Build split datasets using PyTorchMMWHS (ImageDataset emits dict samples)
         self.train_dataset = PyTorchMMWHS(
             base_path=str(location),
             domain=domain,
@@ -246,13 +244,15 @@ class MMWHS(BaseDataset):
             "batch_size": batch_size,
             "num_workers": num_workers,
             "pin_memory": True if torch.cuda.is_available() else False,
-            "collate_fn": simple_collate_fn,
+            "collate_fn": meta_safe_collate,
         }
         if num_workers and num_workers > 0:
-            train_loader_kwargs.update({
-                "persistent_workers": True,
-                "prefetch_factor": 2,
-            })
+            train_loader_kwargs.update(
+                {
+                    "persistent_workers": True,
+                    "prefetch_factor": 2,
+                }
+            )
         self.train_loader = DataLoader(self.train_dataset, **train_loader_kwargs)
 
         val_loader_kwargs = {
@@ -260,13 +260,15 @@ class MMWHS(BaseDataset):
             "batch_size": batch_size,
             "num_workers": num_workers,
             "pin_memory": True if torch.cuda.is_available() else False,
-            "collate_fn": simple_collate_fn,
+            "collate_fn": meta_safe_collate,
         }
         if num_workers and num_workers > 0:
-            val_loader_kwargs.update({
-                "persistent_workers": True,
-                "prefetch_factor": 2,
-            })
+            val_loader_kwargs.update(
+                {
+                    "persistent_workers": True,
+                    "prefetch_factor": 2,
+                }
+            )
         self.val_loader = DataLoader(self.val_dataset, **val_loader_kwargs)
 
         # For compatibility, create test_loader
@@ -275,13 +277,15 @@ class MMWHS(BaseDataset):
             "batch_size": batch_size,
             "num_workers": num_workers,
             "pin_memory": True if torch.cuda.is_available() else False,
-            "collate_fn": simple_collate_fn,
+            "collate_fn": meta_safe_collate,
         }
         if num_workers and num_workers > 0:
-            test_loader_kwargs.update({
-                "persistent_workers": True,
-                "prefetch_factor": 2,
-            })
+            test_loader_kwargs.update(
+                {
+                    "persistent_workers": True,
+                    "prefetch_factor": 2,
+                }
+            )
         self.test_loader = DataLoader(self.test_dataset, **test_loader_kwargs)
 
         self.classnames = list(mmwhs_labels.values())

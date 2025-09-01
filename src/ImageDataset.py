@@ -17,24 +17,18 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from collections import OrderedDict
-import os
-import copy
 from typing import Any
-from pathlib import Path
-import time
-import json
-import datetime as _dt
 
 import numpy as np
 import torch
 from monai.config import DtypeLike
 from monai.data.image_reader import ImageReader
 from monai.transforms import LoadImage, Randomizable, apply_transform
+from monai.data import MetaTensor, Dataset as MonaiDataset
 from monai.utils import MAX_SEED, get_seed
-from torch.utils.data import Dataset
 
 
-class ImageDataset(Dataset, Randomizable):
+class ImageDataset(MonaiDataset, Randomizable):
     """
     Loads image/segmentation pairs of files from the given filename lists. Transformations can be specified
     for the image and segmentation arrays separately.
@@ -52,8 +46,6 @@ class ImageDataset(Dataset, Randomizable):
         transform: Callable | None = None,
         seg_transform: Callable | None = None,
         label_transform: Callable | None = None,
-        image_only: bool = True,
-        transform_with_metadata: bool = False,
         dtype: DtypeLike = np.float32,
         reader: ImageReader | str | None = None,
         seg_reader: ImageReader | str | None = None,
@@ -71,8 +63,8 @@ class ImageDataset(Dataset, Randomizable):
             transform: transform to apply to image arrays.
             seg_transform: transform to apply to segmentation arrays.
             label_transform: transform to apply to the label data.
-            image_only: if True return only the image volume, otherwise, return image volume and the metadata.
-            transform_with_metadata: if True, the metadata will be passed to the transforms whenever possible.
+            Note: this dataset always returns images with metadata (as MetaTensor) and propagates
+            metadata through transforms when possible.
             dtype: if not None convert the loaded image to this data type.
             reader: register reader to load image file and metadata, if None, will use the default readers.
                 If a string of reader name provided, will construct a reader object with the `*args` and `**kwargs`
@@ -91,113 +83,55 @@ class ImageDataset(Dataset, Randomizable):
                 "Must have same the number of segmentation as image files: "
                 f"images={len(image_files)}, segmentations={len(seg_files)}."
             )
-
+        # Store inputs and transforms
         self.image_files = image_files
         self.seg_files = seg_files
         self.labels = labels
         self.transform = transform
         self.seg_transform = seg_transform
         self.label_transform = label_transform
-        if image_only and transform_with_metadata:
-            raise ValueError("transform_with_metadata=True requires image_only=False.")
-        self.image_only = image_only
-        self.transform_with_metadata = transform_with_metadata
-        self.loader = LoadImage(reader, image_only, dtype, *args, **kwargs)
-        self.seg_loader = LoadImage(
-            seg_reader or reader, image_only, dtype, *args, **kwargs
-        )
+
+        # Always load with metadata
+        self.loader = LoadImage(reader, False, dtype, *args, **kwargs)
+        self.seg_loader = LoadImage(seg_reader or reader, False, dtype, *args, **kwargs)
+
+        # Random state for sync between image/seg transforms
         self.set_random_state(seed=get_seed())
-        self._seed = 0  # transform synchronization seed
+        self._seed = 0
 
-        # Detect slice mode (files provided as (path, slice_idx)) and initialize small LRU caches
-        self._slice_mode = any(isinstance(x, tuple) and len(x) == 2 for x in self.image_files)
-        # Allow tuning via env var; default to a conservative cache size to limit RAM
-        self._cache_capacity = int(os.environ.get("XAI_VOLUME_CACHE_CAPACITY", "3"))
-        self._img_volume_cache: "OrderedDict[str, tuple]" = OrderedDict()
-        self._seg_volume_cache: "OrderedDict[str, tuple]" = OrderedDict()
-
-    # -------------------- Profiling helpers (opt-in via env vars) --------------------
-    @staticmethod
-    def _profiling_enabled() -> bool:
-        try:
-            val = os.environ.get("XAI_PROFILE_PREPROCESS", "")
-            return str(val).lower() in ("1", "true", "yes", "y", "on")
-        except Exception:
-            return False
-
-    @staticmethod
-    def _profiling_dir() -> Path:
-        try:
-            d = os.environ.get("XAI_PROFILE_DIR", "./outputs/profiling")
-        except Exception:
-            d = "./outputs/profiling"
-        p = Path(d)
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-
-    @staticmethod
-    def _profiling_log(event: dict) -> None:
-        """Append a JSONL event to a per-process file. Safe for multi-worker DataLoader.
-
-        Control via env vars:
-          - XAI_PROFILE_PREPROCESS=1 to enable
-          - XAI_PROFILE_DIR to choose output folder
-        """
-        if not ImageDataset._profiling_enabled():
-            return
-        try:
-            out = ImageDataset._profiling_dir() / f"preprocess-{os.getpid()}.jsonl"
-            # enrich with timestamp and pid
-            event = dict(event)  # shallow copy
-            event.setdefault("ts", _dt.datetime.now().isoformat(timespec="seconds"))
-            event.setdefault("pid", os.getpid())
-            with open(out, "a", encoding="utf-8") as f:
-                f.write(json.dumps(event, default=str) + "\n")
-        except Exception:
-            # Swallow any logging errors to avoid breaking data loading
-            pass
-
-    def _get_cached_volume(self, kind: str, file_path: str):
-        """Return (array, metadata) for file_path using an LRU cache when in slice mode.
-        kind: 'img' or 'seg'
-        """
-        if not self._slice_mode:
-            # No caching necessary
-            if kind == "img":
-                return self.loader(file_path) if not self.image_only else (self.loader(file_path), None)
-            else:
-                return self.seg_loader(file_path) if not self.image_only else (self.seg_loader(file_path), None)
-
-        cache = self._img_volume_cache if kind == "img" else self._seg_volume_cache
-        loader = self.loader if kind == "img" else self.seg_loader
-
-        # Normalize key to string path
-        key = str(file_path)
-        if key in cache:
-            val = cache.pop(key)
-            cache[key] = val  # move to end (most-recent)
-            # Defensive copy of metadata dict to avoid in-place mutations downstream
-            arr, meta = val
-            meta_copy = copy.deepcopy(meta) if isinstance(meta, dict) else meta
-            return arr, meta_copy
-
-        # Miss: load once and cache
-        if self.image_only:
-            arr = loader(file_path)
-            meta = None
-        else:
-            arr, meta = loader(file_path)
-
-        cache[key] = (arr, meta)
-        # Evict least-recently-used if over capacity
-        if self._cache_capacity > 0 and len(cache) > self._cache_capacity:
-            cache.popitem(last=False)
-
-        meta_copy = copy.deepcopy(meta) if isinstance(meta, dict) else meta
-        return arr, meta_copy
+        # Simple in-memory LRU caches for loaded images and segmentations
+        self._enable_cache = True
+        self._cache_max_items = 96
+        self._img_cache = OrderedDict()
+        self._seg_cache = OrderedDict()
 
     def __len__(self) -> int:
         return len(self.image_files)
+
+    # Cache management helpers
+    def clear_cache(self) -> None:
+        """Clear in-memory image/segmentation caches."""
+        if hasattr(self, "_img_cache"):
+            self._img_cache.clear()
+        if hasattr(self, "_seg_cache"):
+            self._seg_cache.clear()
+        # reset counters when clearing cache
+        self.reset_cache_stats()
+
+    def enable_cache(self, enable: bool = True) -> None:
+        """Enable or disable caching for subsequent loads."""
+        self._enable_cache = bool(enable)
+        if not self._enable_cache:
+            self.clear_cache()
+
+    def set_cache_max_items(self, n: int) -> None:
+        """Set the maximum number of items kept in each cache (image and seg)."""
+        if n <= 0:
+            self._cache_max_items = 0
+            self.clear_cache()
+            self._enable_cache = False
+        else:
+            self._cache_max_items = int(n)
 
     def randomize(self, data: Any | None = None) -> None:
         self._seed = self.R.randint(MAX_SEED, dtype="uint32")
@@ -205,9 +139,6 @@ class ImageDataset(Dataset, Randomizable):
     def __getitem__(self, index: int):
         self.randomize()
         meta_data, seg_meta_data, seg, label = None, None, None, None
-
-        # timing accumulators
-        _t_load_img = _t_load_seg = _t_xform_img = _t_xform_seg = None
 
         # Handle slice tuples for 2D slice loading
         image_file = self.image_files[index]
@@ -223,45 +154,51 @@ class ImageDataset(Dataset, Randomizable):
         if seg_file is not None and isinstance(seg_file, tuple) and len(seg_file) == 2:
             seg_file, seg_slice_idx = seg_file
 
-        # load data and optionally meta (with per-volume caching for slice mode)
-        if image_slice_idx is not None:
-            # Use cached volume loading for images (and seg if present)
-            _t0 = time.perf_counter()
-            img, meta_data = self._get_cached_volume("img", image_file)
-            _t_load_img = time.perf_counter() - _t0
-            if seg_file is not None:
-                _t1 = time.perf_counter()
-                seg, seg_meta_data = self._get_cached_volume("seg", seg_file)
-                _t_load_seg = time.perf_counter() - _t1
-                # Copy relevant spatial metadata from image to segmentation (non-destructive)
-                if isinstance(meta_data, dict) and isinstance(seg_meta_data, dict):
-                    for attribute in meta_data:
-                        seg_meta_data.setdefault(attribute, meta_data[attribute])
+        # load data and meta with caching
+        def _cache_get(cache: OrderedDict, key: str):
+            if key in cache:
+                val = cache.pop(key)
+                cache[key] = val  # move to end (LRU)
+                return val
+            return None
+
+        def _cache_put(cache: OrderedDict, key: str, val: tuple):
+            cache[key] = val
+            # evict oldest if needed
+            if len(cache) > self._cache_max_items:
+                ev_key, _ = cache.popitem(last=False)
+
+        img_key = str(image_file)
+        cached = _cache_get(self._img_cache, img_key) if self._enable_cache else None
+        if cached is not None:
+            img, meta_data = cached
+            # avoid mutating cached meta dict downstream
+            if isinstance(meta_data, dict):
+                meta_data = dict(meta_data)
         else:
-            # Fallback: default loader path (no caching)
-            if self.image_only:
-                _t0 = time.perf_counter()
-                img = self.loader(image_file)
-                _t_load_img = time.perf_counter() - _t0
-                if seg_file is not None:
-                    _t1 = time.perf_counter()
-                    seg = self.seg_loader(seg_file)
-                    _t_load_seg = time.perf_counter() - _t1
+            img, meta_data = self.loader(image_file)
+            if self._enable_cache:
+                _cache_put(self._img_cache, img_key, (img, meta_data))
+
+        if seg_file is not None:
+            seg_key = str(seg_file)
+            cached_seg = (
+                _cache_get(self._seg_cache, seg_key) if self._enable_cache else None
+            )
+            if cached_seg is not None:
+                seg, seg_meta_data = cached_seg
+                if isinstance(seg_meta_data, dict):
+                    seg_meta_data = dict(seg_meta_data)
             else:
-                _t0 = time.perf_counter()
-                img, meta_data = self.loader(image_file)
-                _t_load_img = time.perf_counter() - _t0
-                if seg_file is not None:
-                    _t1 = time.perf_counter()
-                    seg, seg_meta_data = self.seg_loader(seg_file)
-                    _t_load_seg = time.perf_counter() - _t1
-                    # Copy relevant spatial metadata from image to segmentation
-                    if meta_data and seg_meta_data:
-                        for attribute in meta_data:
-                            if attribute not in seg_meta_data:
-                                seg_meta_data[attribute] = meta_data[attribute]
-        
-        #print(f"[DEBUG] index: {index}, image_file: {image_file}, img mean: {np.mean(img):.4f}, img shape: {img.shape}")                    
+                seg, seg_meta_data = self.seg_loader(seg_file)
+                if self._enable_cache:
+                    _cache_put(self._seg_cache, seg_key, (seg, seg_meta_data))
+
+            # Copy relevant spatial metadata from image to segmentation
+            if meta_data and seg_meta_data:
+                for attribute in meta_data:
+                    if attribute not in seg_meta_data:
+                        seg_meta_data[attribute] = meta_data[attribute]
 
         # Helper to derive 2D affine from 3D affine for slice k (slice along last axis)
         def build_2d_affine_from_3d(affine3d: np.ndarray, k: int) -> np.ndarray:
@@ -322,83 +259,53 @@ class ImageDataset(Dataset, Randomizable):
             if isinstance(self.transform, Randomizable):
                 self.transform.set_random_state(seed=self._seed)
 
-            _t0 = time.perf_counter()
-            if self.transform_with_metadata:
-                img, meta_data = apply_transform(
-                    self.transform, (img, meta_data), map_items=False, unpack_items=True
-                )
+            # Always apply transforms with metadata propagation via MetaTensor
+            wrapped_img = (
+                MetaTensor(img, meta=meta_data) if isinstance(meta_data, dict) else img
+            )
+            out = apply_transform(self.transform, wrapped_img, map_items=False)
+            if isinstance(out, MetaTensor):
+                img = out
+                meta_data = dict(out.meta) if out.meta is not None else meta_data
             else:
-                img = apply_transform(self.transform, img, map_items=False)
-            _t_xform_img = time.perf_counter() - _t0
+                img = (
+                    MetaTensor(out, meta=meta_data)
+                    if isinstance(meta_data, dict)
+                    else out
+                )
 
         if self.seg_files is not None and self.seg_transform is not None:
             if isinstance(self.seg_transform, Randomizable):
                 self.seg_transform.set_random_state(seed=self._seed)
 
-            _t0 = time.perf_counter()
-            if self.transform_with_metadata:
-                seg, seg_meta_data = apply_transform(
-                    self.seg_transform,
-                    (seg, seg_meta_data),
-                    map_items=False,
-                    unpack_items=True,
+            wrapped_seg = (
+                MetaTensor(seg, meta=seg_meta_data)
+                if isinstance(seg_meta_data, dict)
+                else seg
+            )
+            seg_out = apply_transform(self.seg_transform, wrapped_seg, map_items=False)
+            if isinstance(seg_out, MetaTensor):
+                seg = seg_out
+                seg_meta_data = (
+                    dict(seg_out.meta) if seg_out.meta is not None else seg_meta_data
                 )
             else:
-                seg = apply_transform(self.seg_transform, seg, map_items=False)
-            _t_xform_seg = time.perf_counter() - _t0
+                seg = (
+                    MetaTensor(seg_out, meta=seg_meta_data)
+                    if isinstance(seg_meta_data, dict)
+                    else seg_out
+                )
 
         if self.labels is not None:
             label = self.labels[index]
             if self.label_transform is not None:
                 label = apply_transform(self.label_transform, label, map_items=False)  # type: ignore
-        
-        
-        # construct outputs
-        data = [img]
+
+        # construct MONAI-native dict output
+        sample = {"image": img}
         if seg is not None:
-            data.append(seg)
+            sample["label"] = seg
         if label is not None:
-            data.append(label)
-        if not self.image_only and meta_data is not None:
-            data.append(meta_data)
-        if not self.image_only and seg_meta_data is not None:
-            data.append(seg_meta_data)
-        if len(data) == 1:
-            return data[0]
-        # Optional: emit a profiling event for this item
-        try:
-            if ImageDataset._profiling_enabled():
-                def _shape_dtype(x):
-                    try:
-                        s = tuple(x.shape) if hasattr(x, "shape") else None
-                        dt = str(getattr(x, "dtype", None))
-                        return s, dt
-                    except Exception:
-                        return None, None
-
-                img_shape, img_dtype = _shape_dtype(data[0]) if len(data) >= 1 else (None, None)
-                seg_shape, seg_dtype = _shape_dtype(data[1]) if len(data) >= 2 else (None, None)
-                ImageDataset._profiling_log(
-                    {
-                        "event": "preprocess",
-                        "index": int(index),
-                        "image_file": str(image_file),
-                        "seg_file": str(seg_file) if seg_file is not None else None,
-                        "slice_idx": int(image_slice_idx) if image_slice_idx is not None else None,
-                        "seg_slice_idx": int(seg_slice_idx) if seg_slice_idx is not None else None,
-                        "t_load_img_s": float(_t_load_img) if _t_load_img is not None else None,
-                        "t_load_seg_s": float(_t_load_seg) if _t_load_seg is not None else None,
-                        "t_xform_img_s": float(_t_xform_img) if _t_xform_img is not None else None,
-                        "t_xform_seg_s": float(_t_xform_seg) if _t_xform_seg is not None else None,
-                        "img_shape": img_shape,
-                        "img_dtype": img_dtype,
-                        "seg_shape": seg_shape,
-                        "seg_dtype": seg_dtype,
-                    }
-                )
-        except Exception:
-            pass
-
-        # use tuple instead of list as the default collate_fn callback of MONAI DataLoader flattens nested lists
-        return tuple(data)
-       
+            sample["class"] = label
+        # metadata stays inside MetaTensor; no separate meta dicts returned
+        return sample

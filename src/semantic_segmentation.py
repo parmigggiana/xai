@@ -293,6 +293,30 @@ class MedicalSegmenter(nn.Module):
         for param in self.encoder.parameters():
             param.requires_grad = True
 
+    def _unpack_batch(self, batch):
+        """Return (images, labels) from either a dict-style MONAI batch or a tuple/list.
+        Falls back to common alternative keys when using dict-based datasets.
+        """
+        images = labels = None
+        try:
+            if isinstance(batch, dict):
+                images = batch.get("image", batch.get("images"))
+                labels = batch.get("label", batch.get("labels"))
+                if labels is None:
+                    labels = (
+                        batch.get("seg") or batch.get("mask") or batch.get("target")
+                    )
+            else:
+                # tuple/list
+                if len(batch) > 0:
+                    images = batch[0]
+                if len(batch) > 1:
+                    labels = batch[1]
+        except Exception:
+            # Leave as None if extraction fails
+            pass
+        return images, labels
+
     def finetune(
         self,
         epochs: int = 5,
@@ -309,7 +333,7 @@ class MedicalSegmenter(nn.Module):
             raise ValueError("Dataset must be provided to finetune the model")
 
         # Force CPU execution and comment out CUDA selection to disable CUDA optimizations
-        #device = torch.device("cpu")
+        # device = torch.device("cpu")
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.to(device)
@@ -413,14 +437,16 @@ class MedicalSegmenter(nn.Module):
                 train_pbar = tqdm(self.dataset.train_loader, desc="Training")
                 for batch_idx, batch in enumerate(train_pbar):
                     with timer(f"batch {batch_idx}"):
-                        outputs, loss_value, success, dbg = self._process_training_batch(
-                            batch,
-                            device,
-                            loss_function,
-                            optimizer,
-                            scaler,
-                            max_grad_norm,
-                            batch_idx,
+                        outputs, loss_value, success, dbg = (
+                            self._process_training_batch(
+                                batch,
+                                device,
+                                loss_function,
+                                optimizer,
+                                scaler,
+                                max_grad_norm,
+                                batch_idx,
+                            )
                         )
 
                     if success:
@@ -493,8 +519,17 @@ class MedicalSegmenter(nn.Module):
                                 prof.step()
                             except Exception:
                                 pass
-                        images = batch[0].to(device, non_blocking=True)
-                        labels = batch[1].to(device, non_blocking=True)
+                        images, labels = self._unpack_batch(batch)
+                        if images is None or labels is None:
+                            # Skip batches without required components
+                            continue
+                        # Drop MetaTensor metadata for network forward to avoid inconsistent meta batching
+                        if hasattr(images, "as_tensor"):
+                            images = images.as_tensor()
+                        if hasattr(labels, "as_tensor"):
+                            labels = labels.as_tensor()
+                        images = images.to(device, non_blocking=True)
+                        labels = labels.to(device, non_blocking=True)
 
                         if device.type == "cuda":
                             torch.cuda.synchronize()
@@ -516,9 +551,16 @@ class MedicalSegmenter(nn.Module):
 
                         # Convert to one-hot for metrics (C channels)
                         try:
-                            def _to_onehot(x: torch.Tensor, num_classes: int) -> torch.Tensor:
+
+                            def _to_onehot(
+                                x: torch.Tensor, num_classes: int
+                            ) -> torch.Tensor:
                                 x = x.squeeze(1).long()
-                                oh = F.one_hot(x, num_classes=num_classes).movedim(-1, 1).float()
+                                oh = (
+                                    F.one_hot(x, num_classes=num_classes)
+                                    .movedim(-1, 1)
+                                    .float()
+                                )
                                 return oh
 
                             preds_oh = _to_onehot(preds, self.num_classes)
@@ -530,23 +572,24 @@ class MedicalSegmenter(nn.Module):
 
                         dice_metric(y_pred=preds_oh, y=labels_oh)
 
+                        # Cache summary after each batch (validation) - removed verbose prints
+
                         # Print or visualize debug info (limit verbose output)
                         if visualize_batches:
                             try:
                                 self._visualize_batch(
-                                    images, preds, labels, title=f"Val batch {batch_idx}"
+                                    images,
+                                    preds,
+                                    labels,
+                                    title=f"Val batch {batch_idx}",
                                 )
                             except Exception as e:
                                 print(
                                     f"[DEBUG] Visualization failed for val batch {batch_idx}: {e}"
                                 )
                         else:
-                            try:
-                                imgs_np = images.detach().cpu().numpy()
-                                labels_np = labels.detach().cpu().numpy()
-                                preds_np = preds.detach().cpu().numpy()
-                            except Exception as e:
-                                print(f"[DEBUG] Failed to print val batch {batch_idx}: {e}")
+                            # keep loop lightweight when not visualizing
+                            pass
 
                     epoch_val_loss = float(np.mean(val_losses)) if val_losses else 0.0
                     dice_result = dice_metric.aggregate()
@@ -650,8 +693,16 @@ class MedicalSegmenter(nn.Module):
 
             optimizer.zero_grad()
 
-            images = batch[0].to(device, non_blocking=True)
-            labels = batch[1].to(device, non_blocking=True)
+            images, labels = self._unpack_batch(batch)
+            if images is None or labels is None:
+                raise RuntimeError("Batch does not contain 'image' and 'label'.")
+            # Convert MetaTensor -> Tensor to avoid meta tracking issues in forward
+            if hasattr(images, "as_tensor"):
+                images = images.as_tensor()
+            if hasattr(labels, "as_tensor"):
+                labels = labels.as_tensor()
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
 
             # If dataset provides a decode mapping (e.g. CHAOS/MMWHS), apply it only when needed.
             # Many preprocessing pipelines already decode; avoid double-decoding by checking dtype/range.
@@ -786,25 +837,23 @@ class MedicalSegmenter(nn.Module):
                     param.data += task_vector.vector[name]
 
     def _visualize_batch(self, images, preds, labels, title: str = "batch"):
-        """Display images, predictions and labels side-by-side for the first item in the batch.
+        """Display images, predictions and labels for the first item in the batch.
 
         Expects images: [B, C, H, W] or [B, 1, H, W]; preds/labels: [B, 1, H, W] (class indices).
         """
-        # Move to cpu numpy
         imgs = images.detach().cpu()
         p = preds.detach().cpu()
-        l = labels.detach().cpu()
+        labels_cpu = labels.detach().cpu()
 
-        # Take first element
+        # First item
         img = imgs[0]
         pred = p[0]
-        lab = l[0]
+        lab = labels_cpu[0]
 
         # Squeeze channel dims
         if img.ndim == 3 and img.shape[0] == 1:
             img = img.squeeze(0)
         elif img.ndim == 3 and img.shape[0] > 1:
-            # If multi-channel, take first channel for display
             img = img[0]
 
         if pred.ndim > 2:
@@ -828,7 +877,12 @@ class MedicalSegmenter(nn.Module):
         plt.tight_layout()
         plt.show()
 
-    def evaluate(self, visualize: bool = False, profile: bool | str = False, profile_dir: str = "./outputs/profiling"):
+    def evaluate(
+        self,
+        visualize: bool = False,
+        profile: bool | str = False,
+        profile_dir: str = "./outputs/profiling",
+    ):
         """
         Evaluate the model and return metrics on both train and test loaders.
         Memory-optimized version with aggressive memory management for large datasets like MMWHS.
@@ -866,7 +920,13 @@ class MedicalSegmenter(nn.Module):
 
             # Optional torch profiler per split
             prof_cm = (
-                torch_profiler_ctx(name=f"eval-{split}", out_dir=profile_dir, wait=1, warmup=1, active=5)
+                torch_profiler_ctx(
+                    name=f"eval-{split}",
+                    out_dir=profile_dir,
+                    wait=1,
+                    warmup=1,
+                    active=5,
+                )
                 if profile == "torch"
                 else contextlib.nullcontext()
             )
@@ -878,19 +938,28 @@ class MedicalSegmenter(nn.Module):
                             prof.step()
                         except Exception:
                             pass
-                    images = batch[0].to(device)
-                    labels = batch[1] if len(batch) > 1 else None
+                    images, labels = self._unpack_batch(batch)
+                    if images is None:
+                        continue
+                    # Drop MetaTensor metadata and move to device
+                    if hasattr(images, "as_tensor"):
+                        images = images.as_tensor()
+                    images = images.to(device, non_blocking=True)
+                    if labels is not None and hasattr(labels, "as_tensor"):
+                        labels = labels.as_tensor()
 
                     if labels is None:
                         del images
                         continue
 
-                    labels = labels.to(device)
+                    labels = labels.to(device, non_blocking=True)
                     # Same safe decode logic as in training to avoid double-decode
                     if hasattr(self.dataset, "decode"):
                         try:
                             is_long_int = labels.dtype == torch.long
-                            max_val = int(labels.max().item()) if labels.numel() > 0 else 0
+                            max_val = (
+                                int(labels.max().item()) if labels.numel() > 0 else 0
+                            )
                             if not is_long_int and max_val < self.num_classes:
                                 labels = labels.long()
                             elif is_long_int and max_val < self.num_classes:
@@ -914,7 +983,9 @@ class MedicalSegmenter(nn.Module):
                     # Convert to one-hot for metrics
                     def _to_onehot(x: torch.Tensor, num_classes: int) -> torch.Tensor:
                         x = x.squeeze(1).long()
-                        oh = F.one_hot(x, num_classes=num_classes).movedim(-1, 1).float()
+                        oh = (
+                            F.one_hot(x, num_classes=num_classes).movedim(-1, 1).float()
+                        )
                         return oh
 
                     try:
@@ -954,7 +1025,9 @@ class MedicalSegmenter(nn.Module):
                         hausdorff_dist = float(hd_vals)
 
                     results[split] = {"dice": dice_score, "hausdorff": hausdorff_dist}
-                    print(f"✅ {split} - Dice: {dice_score:.4f}, Hausdorff: {hausdorff_dist:.4f}")
+                    print(
+                        f"✅ {split} - Dice: {dice_score:.4f}, Hausdorff: {hausdorff_dist:.4f}"
+                    )
                     # Perform the visualization once per split at the end
                     if visualize and viz_images is not None:
                         try:
@@ -965,7 +1038,9 @@ class MedicalSegmenter(nn.Module):
                                 title=f"Eval {split} summary",
                             )
                         except Exception as e:
-                            print(f"[DEBUG] Final visualization failed for {split}: {e}")
+                            print(
+                                f"[DEBUG] Final visualization failed for {split}: {e}"
+                            )
                 except (ValueError, RuntimeError) as e:
                     print(f"⚠️ Error aggregating metrics for {split}: {e}")
                     results[split] = {"dice": None, "hausdorff": None}

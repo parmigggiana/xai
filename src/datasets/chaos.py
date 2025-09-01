@@ -5,11 +5,11 @@ import numpy as np
 import torch
 from matplotlib import cm
 from monai.data import DataLoader, ITKReader, PILReader
+from src.utils import meta_safe_collate
 
 from src.datasets.common import BaseDataset
 from src.ImageDataset import ImageDataset
 from src.ITKReader2D import ITKReader2D
-from src.utils import simple_collate_fn
 from src.volumetricPNGReader import VolumetricPNGReader
 
 chaos_labels_mr = [
@@ -89,8 +89,6 @@ class PyTorchCHAOS(ImageDataset):
             seg_transform=seg_transform,
             reader=ITKReader2D() if slice_2d else ITKReader(),  # Use our fixed reader
             seg_reader=PILReader() if slice_2d else VolumetricPNGReader(),
-            image_only=False,
-            transform_with_metadata=True,
         )
 
     def _load_all_file_lists(self):
@@ -151,12 +149,6 @@ class PyTorchCHAOS(ImageDataset):
             seg_path = patient_id / "T2SPIR" / "Ground"
         return img_path, seg_path
 
-    # def __getitem__(self, index):
-    #     print(f"Fetching item at index: {index}")
-    #     print(f"Item path: {self.image_files[index]}")
-    #     print(f"Segmentation path: {self.seg_files[index]}")
-    #     return super().__getitem__(index)
-
 
 class CHAOS(BaseDataset):
     def __init__(
@@ -201,12 +193,12 @@ class CHAOS(BaseDataset):
             abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6
         ), "Train, validation, and test ratios must sum to 1.0"
 
-        # Create a full dataset to get all available samples
+        # Create a full dataset to discover all samples (reuses scanning logic)
         full_dataset = PyTorchCHAOS(
             base_path=str(location),
             domain=domain,
             slice_2d=slice_2d,
-            indices=None,  # Get all samples
+            indices=None,
             transform=transform,
             seg_transform=seg_transform,
             liver_only=liver_only,
@@ -235,7 +227,7 @@ class CHAOS(BaseDataset):
         val_indices = indices[train_size : train_size + val_size]
         test_indices = indices[train_size + val_size :]
 
-        # Create datasets for each split
+        # Build split datasets using PyTorchCHAOS (ImageDataset emits dict samples)
         self.train_dataset = PyTorchCHAOS(
             base_path=str(location),
             domain=domain,
@@ -272,13 +264,15 @@ class CHAOS(BaseDataset):
             "batch_size": batch_size,
             "num_workers": num_workers,
             "pin_memory": True if torch.cuda.is_available() else False,
-            "collate_fn": simple_collate_fn,
+            "collate_fn": meta_safe_collate,
         }
         if num_workers and num_workers > 0:
-            train_loader_kwargs.update({
-                "persistent_workers": True,
-                "prefetch_factor": 2,
-            })
+            train_loader_kwargs.update(
+                {
+                    "persistent_workers": True,
+                    "prefetch_factor": 2,
+                }
+            )
         self.train_loader = DataLoader(self.train_dataset, **train_loader_kwargs)
 
         val_loader_kwargs = {
@@ -286,13 +280,15 @@ class CHAOS(BaseDataset):
             "batch_size": batch_size,
             "num_workers": num_workers,
             "pin_memory": True if torch.cuda.is_available() else False,
-            "collate_fn": simple_collate_fn,
+            "collate_fn": meta_safe_collate,
         }
         if num_workers and num_workers > 0:
-            val_loader_kwargs.update({
-                "persistent_workers": True,
-                "prefetch_factor": 2,
-            })
+            val_loader_kwargs.update(
+                {
+                    "persistent_workers": True,
+                    "prefetch_factor": 2,
+                }
+            )
         self.val_loader = DataLoader(self.val_dataset, **val_loader_kwargs)
 
         if self.domain == "CT":

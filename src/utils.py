@@ -166,47 +166,127 @@ def print_memory_usage(stage=""):
         print(f"{stage} - RAM: {memory_mb:.1f}MB")
 
 
-def simple_collate_fn(batch):
-    """Custom collate function that handles 4-element tuples: (image, label, dict_data, metadata)"""
-    if isinstance(batch[0], tuple) and len(batch[0]) == 4:
-        # Extract components
-        images = [item[0] for item in batch]
-        labels = [item[1] for item in batch]
-        dict_data = [item[2] for item in batch]
-        metadata = [item[3] for item in batch]
+# MONAI-native dict-based transform constructors
+def build_monai_dict_transforms(
+    dataset_name: str, domain: str, spatial_size: int, is_training: bool, use_3d: bool
+):
+    from monai import transforms as T
+    import torch
 
-        # Check for duplicates or similar images
-        from torch.utils.data._utils.collate import default_collate
+    # Decode func per dataset
+    def get_decode():
+        from src.datasets.mmwhs import mmwhs_labels
 
-        try:
-            # Standard collation
-            collated_images = default_collate(images)
-            collated_labels = default_collate(labels)
+        if dataset_name.upper() == "CHAOS":
+            if domain.upper() in ("MR", "MRI"):
+                return lambda labels: labels // 63
+            return lambda labels: torch.where(labels > 0, 1.0, 0.0)
+        if dataset_name.upper() == "MMWHS":
 
-            # Optionally add batch augmentation here
-            # This applies different augmentations to different items in batch
+            def decode(labels):
+                decoded = torch.zeros_like(labels, dtype=torch.float32)
+                for i, val in enumerate(mmwhs_labels.keys()):
+                    decoded[labels == val] = i
+                return decoded
 
-            return collated_images, collated_labels, dict_data, metadata
-        except Exception as e:
-            print(f"Error in collation: {e}")
-            # More robust fallback
-            return torch.stack(images), torch.stack(labels), dict_data, metadata
+            return decode
+        return lambda x: x
 
-    elif isinstance(batch[0], tuple) and len(batch[0]) == 2:
-        # Fallback for 2-element tuples
-        data_batch = [item[0] for item in batch]
-        metadata_batch = [item[1] for item in batch]
+    keys_img = ["image"]
+    keys_lbl = ["label"]
+    decode = get_decode()
 
-        from torch.utils.data._utils.collate import default_collate
-
-        collated_data = default_collate(data_batch)
-        return collated_data, metadata_batch
-
+    t: list = []
+    # loaders
+    # Leave readers to MONAI auto-dispatch based on file extension; users can override if needed
+    # Channels/orientation
+    if use_3d:
+        t += [
+            T.LoadImaged(keys=keys_img + keys_lbl),
+            T.EnsureChannelFirstd(keys=keys_img + keys_lbl, channel_dim="no_channel"),
+            T.Orientationd(keys=keys_img + keys_lbl, axcodes="RAS"),
+        ]
     else:
-        # Fallback to default collation
-        from torch.utils.data._utils.collate import default_collate
+        t += [
+            T.LoadImaged(keys=keys_img + keys_lbl),
+            T.Lambdad(
+                keys=keys_img + keys_lbl,
+                func=lambda x: (
+                    x.squeeze(-1) if hasattr(x, "shape") and x.ndim >= 3 else x
+                ),
+            ),
+            T.EnsureChannelFirstd(keys=keys_img + keys_lbl, channel_dim="no_channel"),
+        ]
 
-        return default_collate(batch)
+    # Intensity
+    if domain.upper() == "CT":
+        t += [
+            T.ScaleIntensityRanged(
+                keys=keys_img, a_min=-57, a_max=164, b_min=0.0, b_max=1.0, clip=True
+            )
+        ]
+    else:
+        t += [T.NormalizeIntensityd(keys=keys_img, nonzero=True, channel_wise=True)]
+
+    if is_training:
+        t += [
+            T.RandGaussianNoised(keys=keys_img, prob=0.2, std=0.05),
+            T.RandAdjustContrastd(keys=keys_img, prob=0.2, gamma=(0.9, 1.1)),
+        ]
+
+    # Label decode
+    t += [T.Lambdad(keys=keys_lbl, func=decode)]
+
+    # Resize + type
+    t += [
+        T.Resized(
+            keys=keys_img, spatial_size=spatial_size, size_mode="longest", mode="area"
+        ),
+        T.Resized(
+            keys=keys_lbl,
+            spatial_size=spatial_size,
+            size_mode="longest",
+            mode="nearest",
+        ),
+        T.EnsureTyped(keys=keys_img, dtype=torch.float32, track_meta=True),
+        T.EnsureTyped(keys=keys_lbl, dtype=torch.float32, track_meta=False),
+    ]
+
+    return T.Compose(t)
+
+
+# Collate helpers
+def meta_safe_collate(batch):
+    """Collate that converts MetaTensor -> Tensor before stacking, dropping metadata.
+
+    Supports batches of tuples like (image, label) or single tensors.
+    """
+    from torch.utils.data._utils.collate import default_collate
+
+    def to_tensor(x):
+        try:
+            return x.as_tensor() if hasattr(x, "as_tensor") else x
+        except Exception:
+            return x
+
+    if isinstance(batch[0], tuple):
+        # transpose list of tuples into tuple of lists
+        columns = list(zip(*batch))
+        collated = []
+        for col in columns:
+            items = [to_tensor(x) for x in col]
+            collated.append(default_collate(items))
+        return tuple(collated) if len(collated) > 1 else collated[0]
+    elif isinstance(batch[0], dict):
+        keys = batch[0].keys()
+        out = {}
+        for k in keys:
+            vals = [to_tensor(sample[k]) for sample in batch]
+            out[k] = default_collate(vals)
+        return out
+    else:
+        items = [to_tensor(x) for x in batch]
+        return default_collate(items)
 
 
 ################################### Testing Sampler ####################################
