@@ -167,6 +167,9 @@ class CHAOS(BaseDataset):
         val_ratio=0.15,
         test_ratio=0.15,
         random_seed=42,
+        # passthrough knobs for ImageDataset caching behavior
+        cache_max_items: int | None = None,
+        enable_cache: bool | None = None,
     ):
         """
         CHAOS Dataset with proper train/validation/test splitting.
@@ -204,6 +207,8 @@ class CHAOS(BaseDataset):
             transform=transform,
             seg_transform=seg_transform,
             liver_only=liver_only,
+            cache_max_items=cache_max_items,
+            enable_cache=enable_cache,
         )
 
         # Get total number of samples
@@ -238,6 +243,8 @@ class CHAOS(BaseDataset):
             transform=transform,
             seg_transform=seg_transform,
             liver_only=liver_only,
+            cache_max_items=cache_max_items,
+            enable_cache=enable_cache,
         )
 
         self.val_dataset = PyTorchCHAOS(
@@ -248,6 +255,8 @@ class CHAOS(BaseDataset):
             transform=transform,
             seg_transform=seg_transform,
             liver_only=liver_only,
+            cache_max_items=cache_max_items,
+            enable_cache=enable_cache,
         )
 
         self.test_dataset = PyTorchCHAOS(
@@ -258,6 +267,8 @@ class CHAOS(BaseDataset):
             transform=transform,
             seg_transform=seg_transform,
             liver_only=liver_only,
+            cache_max_items=cache_max_items,
+            enable_cache=enable_cache,
         )
 
         # Create DataLoaders
