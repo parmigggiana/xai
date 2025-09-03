@@ -15,16 +15,17 @@ This file is based on ImageDataset from MONAI, modified to support different ima
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
 from collections import OrderedDict
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import numpy as np
 import torch
 from monai.config import DtypeLike
+from monai.data import Dataset as MonaiDataset
+from monai.data import MetaTensor
 from monai.data.image_reader import ImageReader
 from monai.transforms import LoadImage, Randomizable, apply_transform
-from monai.data import MetaTensor, Dataset as MonaiDataset
 from monai.utils import MAX_SEED, get_seed
 
 

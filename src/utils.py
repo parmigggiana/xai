@@ -170,8 +170,8 @@ def print_memory_usage(stage=""):
 def build_monai_dict_transforms(
     dataset_name: str, domain: str, spatial_size: int, is_training: bool, use_3d: bool
 ):
-    from monai import transforms as T
     import torch
+    from monai import transforms as T
 
     # Decode func per dataset
     def get_decode():

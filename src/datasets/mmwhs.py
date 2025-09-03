@@ -5,11 +5,10 @@ import numpy as np
 import torch
 from matplotlib import cm
 from monai.data import DataLoader, NibabelReader
-from src.utils import meta_safe_collate
-
 
 from src.datasets.common import BaseDataset
 from src.ImageDataset import ImageDataset
+from src.utils import meta_safe_collate
 
 mmwhs_labels = {
     0: "Background",

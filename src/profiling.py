@@ -1,16 +1,15 @@
 import contextlib
 import cProfile
+import csv
 import datetime as _dt
+import json
 import os
-from pathlib import Path
 import pstats
 import time
+from pathlib import Path
 from typing import Iterator, Optional
 
 import torch
-import json
-import csv
-
 
 # Default output directory for profiling artifacts
 DEFAULT_PROFILING_DIR = "./outputs/profiling"

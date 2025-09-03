@@ -1,9 +1,9 @@
-import gc
 import contextlib
+import gc
 import os
 import zipfile
 from pathlib import Path
-from typing import OrderedDict, Tuple, Optional
+from typing import Optional, OrderedDict, Tuple
 
 import numpy as np
 import torch

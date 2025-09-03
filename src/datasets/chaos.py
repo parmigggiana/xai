@@ -5,11 +5,11 @@ import numpy as np
 import torch
 from matplotlib import cm
 from monai.data import DataLoader, ITKReader, PILReader
-from src.utils import meta_safe_collate
 
 from src.datasets.common import BaseDataset
 from src.ImageDataset import ImageDataset
 from src.ITKReader2D import ITKReader2D
+from src.utils import meta_safe_collate
 from src.volumetricPNGReader import VolumetricPNGReader
 
 chaos_labels_mr = [
