@@ -313,6 +313,7 @@ class MedicalSegmenter(nn.Module):
         profile: bool | str = False,  # False | 'cprofile' | 'torch'
         profile_dir: str = "./outputs/profiling",
         debug: Optional[bool] = None,
+        compile_model: bool = False,
     ):
         # If caller doesn't pass debug (None), use global DEBUG (if available);
         # otherwise, always respect the explicit value (True/False) passed in.
@@ -334,7 +335,7 @@ class MedicalSegmenter(nn.Module):
         except Exception:
             pass
 
-        # Configure TF32 and AMP dtype based on hardware support
+    # Configure TF32 and AMP dtype based on hardware support
         try:
             if device.type == "cuda":
                 # Allow TF32 matmul/conv on Ampere and newer (no-op on older GPUs)
@@ -358,6 +359,17 @@ class MedicalSegmenter(nn.Module):
                 self._amp_dtype = None
         except Exception:
             self._amp_dtype = None
+
+    # Optionally compile the encoder for speed (CUDA-only)
+        if compile_model and device.type == "cuda" and hasattr(torch, "compile"):
+            try:
+                # Prefer more aggressive autotuning on CUDA
+                self.encoder = torch.compile(self.encoder, mode="max-autotune")
+                if debug:
+                    print("   torch.compile enabled (encoder)")
+            except Exception as e:
+                print(f"[compile] disabled (fallback): {e}")
+
 
         print(f"🚀 Starting training for {epochs} epochs")
         print(f"   Device: {device}")
@@ -705,9 +717,24 @@ class MedicalSegmenter(nn.Module):
         dice_metric = DiceMetric(include_background=False, reduction="mean")
 
         # Setup optimizer
-        optimizer = optim.AdamW(
-            self.parameters(), lr=learning_rate, weight_decay=weight_decay, fused=True
-        )
+        # AdamW fused fallback (CPU or older PyTorch may not support 'fused')
+        if self.device.type == "cuda":
+            try:
+                optimizer = optim.AdamW(
+                    self.parameters(),
+                    lr=learning_rate,
+                    weight_decay=weight_decay,
+                    fused=True,
+                )
+            except (TypeError, RuntimeError):
+                optimizer = optim.AdamW(
+                    self.parameters(), lr=learning_rate, weight_decay=weight_decay
+                )
+        else:
+            # Do not pass 'fused' on CPU to avoid unsupported-arg errors
+            optimizer = optim.AdamW(
+                self.parameters(), lr=learning_rate, weight_decay=weight_decay
+            )
 
         # Enable AMP GradScaler on CUDA only for FP16; BF16 does not need GradScaler
         amp_dtype = getattr(self, "_amp_dtype", None)
