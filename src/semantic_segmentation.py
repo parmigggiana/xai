@@ -829,12 +829,15 @@ class MedicalSegmenter(nn.Module):
         #     print(f"⚠️ Error at batch {batch_idx}: {e}")
         #     return None, 0.0, False, None
 
-    def load_task_vector(self, task_vector):
-        """Load a task vector into the model."""
+    def load_task_vector(self, task_vector, scaling_coef: float = 1.0):
+        """Apply a task vector to the current encoder with a scaling coefficient.
+
+        This mirrors the upstream task_vectors API where scaling is applied at application time.
+        """
         with torch.no_grad():
             for name, param in self.encoder.named_parameters():
                 if name in task_vector.vector:
-                    param.data += task_vector.vector[name]
+                    param.data += scaling_coef * task_vector.vector[name]
 
     def _visualize_batch(self, images, preds, labels, title: str = "batch"):
         """Display images, predictions and labels for the first item in the batch.
