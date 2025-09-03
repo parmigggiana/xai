@@ -41,6 +41,8 @@ class MedicalSegmenter(nn.Module):
         self.dataset = dataset
         self.pretrained = pretrained
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # AMP dtype preference (set later based on hardware)
+        self._amp_dtype = None
 
         # Initialize encoder
         if encoder_type == "swin_unetr":
@@ -52,13 +54,10 @@ class MedicalSegmenter(nn.Module):
                 attn_drop_rate=0.0,
                 dropout_path_rate=0.0,
             )
-            # feature_dim = 768
-
-            # Load pretrained SwinViT weights if available
             if pretrained:
                 self._load_swinvit_weights()
-
             self.head = self.encoder.out
+
         elif encoder_type == "clipseg":
             # Extract dataset information for medical template selection
             dataset_info = None
@@ -71,7 +70,7 @@ class MedicalSegmenter(nn.Module):
             model = CLIPSeg(
                 classes=dataset.classnames,
                 version="ViT-B/16",
-                reduce_dim=64,  # Rimuovi questo parametro
+                reduce_dim=64,
                 aggregation_mode="argmax",
                 background_class=True,
                 dataset_info=dataset_info,
@@ -112,24 +111,11 @@ class MedicalSegmenter(nn.Module):
                     ),
                     weights_only=False,
                 )
-
-                # Carica i pesi nel componente clipseg specifico
                 model.clipseg.load_state_dict(state_dict, strict=False)
-
-            # Ensure CLIPSeg parameters are trainable (requires_grad=True)
-            # try:
-            #    for name, param in model.clipseg.named_parameters():
-            #        param.requires_grad = True
-            #    # Also ensure the head (prediction layers) are trainable
-            #    for name, param in model.head.named_parameters():
-            #        param.requires_grad = True
-            # except Exception:
-            # If the model structure differs, fall back to enabling all model params
-            #    for name, param in model.named_parameters():
-            #        param.requires_grad = True
 
             self.encoder = model
             self.head = model.head
+
         else:
             raise ValueError(
                 f"Unknown encoder type: {encoder_type}. Supported: 'swin_unetr', 'clipseg'."
@@ -347,6 +333,31 @@ class MedicalSegmenter(nn.Module):
                 torch.backends.cudnn.benchmark = True
         except Exception:
             pass
+
+        # Configure TF32 and AMP dtype based on hardware support
+        try:
+            if device.type == "cuda":
+                # Allow TF32 matmul/conv on Ampere and newer (no-op on older GPUs)
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+                # Encourage TF32 for float32 matmuls where applicable
+                try:
+                    torch.set_float32_matmul_precision("high")
+                except Exception:
+                    pass
+
+                # Prefer BF16 autocast on GPUs that support it; else fall back to FP16
+                if (
+                    hasattr(torch.cuda, "is_bf16_supported")
+                    and torch.cuda.is_bf16_supported()
+                ):
+                    self._amp_dtype = torch.bfloat16
+                else:
+                    self._amp_dtype = torch.float16
+            else:
+                self._amp_dtype = None
+        except Exception:
+            self._amp_dtype = None
 
         print(f"🚀 Starting training for {epochs} epochs")
         print(f"   Device: {device}")
@@ -569,7 +580,8 @@ class MedicalSegmenter(nn.Module):
 
                         # Use mixed precision for validation forward for speed when CUDA is available
                         if device.type == "cuda":
-                            with torch.amp.autocast("cuda"):
+                            amp_dtype = getattr(self, "_amp_dtype", torch.float16)
+                            with torch.amp.autocast("cuda", dtype=amp_dtype):
                                 outputs = self.forward(images)
                                 loss_val = loss_function(outputs, labels)
                         else:
@@ -697,8 +709,9 @@ class MedicalSegmenter(nn.Module):
             self.parameters(), lr=learning_rate, weight_decay=weight_decay, fused=True
         )
 
-        # Enable AMP GradScaler on CUDA
-        if self.device.type == "cuda":
+        # Enable AMP GradScaler on CUDA only for FP16; BF16 does not need GradScaler
+        amp_dtype = getattr(self, "_amp_dtype", None)
+        if self.device.type == "cuda" and amp_dtype == torch.float16:
             try:
                 scaler = torch.amp.GradScaler("cuda")
             except Exception:
@@ -744,8 +757,9 @@ class MedicalSegmenter(nn.Module):
             # NOTE: dataset.decode commented out elsewhere; keep as-is
 
             # Forward pass with AMP (if enabled)
-            if scaler is not None and device.type == "cuda":
-                with torch.amp.autocast("cuda"):
+            if device.type == "cuda":
+                amp_dtype = getattr(self, "_amp_dtype", torch.float16)
+                with torch.amp.autocast("cuda", dtype=amp_dtype):
                     outputs = self.forward(images)
                     loss = loss_function(outputs, labels)
             else:
@@ -777,8 +791,12 @@ class MedicalSegmenter(nn.Module):
             #         # Fallback: show summary stats if argmax not applicable
             #         print("Unique predictions (summary):", torch.unique(outputs))
 
-            # Backward/step with GradScaler when available
-            if scaler is not None and device.type == "cuda":
+            # Backward/step: use GradScaler only for FP16; BF16/FP32 use standard path
+            if (
+                device.type == "cuda"
+                and getattr(self, "_amp_dtype", None) == torch.float16
+                and scaler is not None
+            ):
                 scaler.scale(loss).backward()
                 # Unscale before optional gradient clipping
                 try:
@@ -911,15 +929,12 @@ class MedicalSegmenter(nn.Module):
         Evaluate the model and return metrics on both train and test loaders.
         Memory-optimized version with aggressive memory management for large datasets like MMWHS.
         """
-        # Use CUDA if available
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.to(device)
-
         self.eval()
         self.freeze()
 
         dice_metric = DiceMetric(include_background=False, reduction="mean")
-        # Use HD95 and collect raw values so we can ignore inf/NaN from empty masks
         hausdorff_metric = HausdorffDistanceMetric(
             include_background=False,
             reduction="none",
@@ -927,22 +942,38 @@ class MedicalSegmenter(nn.Module):
         )
 
         results = {}
-        self.to(device)
+
+        # Configure TF32 and AMP dtype (same policy as training)
+        try:
+            if device.type == "cuda":
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+                try:
+                    torch.set_float32_matmul_precision("high")
+                except Exception:
+                    pass
+                if (
+                    hasattr(torch.cuda, "is_bf16_supported")
+                    and torch.cuda.is_bf16_supported()
+                ):
+                    amp_dtype = torch.bfloat16
+                else:
+                    amp_dtype = torch.float16
+            else:
+                amp_dtype = None
+        except Exception:
+            amp_dtype = None
 
         for split in ["train", "val", "test"]:
-            # Clear cache before each split
             gc.collect()
-
             loader = getattr(self.dataset, f"{split}_loader", None)
             results[split] = {}
             if loader is None:
                 continue
 
-            has_labels = False  # Track if any labels were processed
-            # Hold a single batch to visualize after finishing the split
+            has_labels = False
             viz_images = viz_preds = viz_labels = None
 
-            # Optional torch profiler per split (opt-in, lazy import)
             if profile == "torch":
                 from src.profiling import torch_profiler_ctx as _torch_profiler_ctx
 
@@ -963,39 +994,34 @@ class MedicalSegmenter(nn.Module):
                             prof.step()
                         except Exception:
                             pass
+
                     images, labels = self._unpack_batch(batch)
                     if images is None:
                         continue
-                    # Drop MetaTensor metadata and move to device
                     if hasattr(images, "as_tensor"):
                         images = images.as_tensor()
                     images = images.to(device, non_blocking=True)
                     if labels is not None and hasattr(labels, "as_tensor"):
                         labels = labels.as_tensor()
-
                     if labels is None:
                         del images
                         continue
-
                     labels = labels.to(device, non_blocking=True)
-                    # ensure integer dtype
                     try:
                         labels = labels.long()
                     except Exception:
                         pass
 
-                    has_labels = True  # At least one batch had labels
+                    has_labels = True
 
-                    # Use mixed precision during evaluation for speed
-                    if device.type == "cuda":
-                        with torch.amp.autocast("cuda"):
+                    if device.type == "cuda" and amp_dtype is not None:
+                        with torch.amp.autocast("cuda", dtype=amp_dtype):
                             outputs = self(images)
                     else:
                         outputs = self(images)
 
                     preds = torch.argmax(outputs, dim=1, keepdim=True)
 
-                    # Convert to one-hot for metrics
                     def _to_onehot(x: torch.Tensor, num_classes: int) -> torch.Tensor:
                         x = x.squeeze(1).long()
                         oh = (
@@ -1010,11 +1036,9 @@ class MedicalSegmenter(nn.Module):
                         preds_oh = (preds > 0).float()
                         labels_oh = (labels > 0).float()
 
-                    # Compute metrics on one-hot masks
                     dice_metric(y_pred=preds_oh, y=labels_oh)
                     hausdorff_metric(y_pred=preds_oh, y=labels_oh)
 
-                    # Store a single batch for visualization at the end of the split
                     if visualize and viz_images is None:
                         try:
                             viz_images = images[:1].detach().cpu()
@@ -1023,11 +1047,9 @@ class MedicalSegmenter(nn.Module):
                         except Exception:
                             viz_images = viz_preds = viz_labels = None
 
-            # Aggregate results with error handling
             if has_labels:
                 try:
                     dice_score = dice_metric.aggregate().item()
-                    # Robust aggregation: ignore inf/NaN HD values (e.g., empty gt/pred for a class)
                     hd_vals = hausdorff_metric.aggregate()
                     if hasattr(hd_vals, "numel"):
                         mask = torch.isfinite(hd_vals)
@@ -1036,14 +1058,12 @@ class MedicalSegmenter(nn.Module):
                         else:
                             hausdorff_dist = float("nan")
                     else:
-                        # Fallback if aggregate returned a scalar
                         hausdorff_dist = float(hd_vals)
 
                     results[split] = {"dice": dice_score, "hausdorff": hausdorff_dist}
                     print(
                         f"✅ {split} - Dice: {dice_score:.4f}, Hausdorff: {hausdorff_dist:.4f}"
                     )
-                    # Perform the visualization once per split at the end
                     if visualize and viz_images is not None:
                         try:
                             self._visualize_batch(
