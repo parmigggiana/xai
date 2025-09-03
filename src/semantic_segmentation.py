@@ -412,8 +412,6 @@ class MedicalSegmenter(nn.Module):
         with prof_cm as prof:
             for epoch in range(epochs):
                 print(f"\n📖 Epoch {epoch + 1}/{epochs}")
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
 
                 self.train()
                 train_losses = []
@@ -530,9 +528,6 @@ class MedicalSegmenter(nn.Module):
                             labels = labels.as_tensor()
                         images = images.to(device, non_blocking=True)
                         labels = labels.to(device, non_blocking=True)
-
-                        if device.type == "cuda":
-                            torch.cuda.synchronize()
 
                         if self.encoder_type == "swin_unetr" and labels.dim() == 4:
                             labels = labels.unsqueeze(1)
@@ -691,7 +686,7 @@ class MedicalSegmenter(nn.Module):
 
         try:
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
             images, labels = self._unpack_batch(batch)
             if images is None or labels is None:
@@ -934,7 +929,7 @@ class MedicalSegmenter(nn.Module):
                 else contextlib.nullcontext()
             )
 
-            with torch.no_grad(), prof_cm as prof:
+            with torch.inference_mode(), prof_cm as prof:
                 for idx, batch in enumerate(tqdm(loader, desc=f"Evaluating {split}")):
                     if profile == "torch" and prof is not None:
                         try:
@@ -956,21 +951,11 @@ class MedicalSegmenter(nn.Module):
                         continue
 
                     labels = labels.to(device, non_blocking=True)
-                    # Same safe decode logic as in training to avoid double-decode
-                    if hasattr(self.dataset, "decode"):
-                        try:
-                            is_long_int = labels.dtype == torch.long
-                            max_val = (
-                                int(labels.max().item()) if labels.numel() > 0 else 0
-                            )
-                            if not is_long_int and max_val < self.num_classes:
-                                labels = labels.long()
-                            elif is_long_int and max_val < self.num_classes:
-                                pass
-                            else:
-                                labels = self.dataset.decode(labels).long()
-                        except Exception:
-                            labels = labels.long()
+                    # ensure integer dtype
+                    try:
+                        labels = labels.long()
+                    except Exception:
+                        pass
 
                     has_labels = True  # At least one batch had labels
 
