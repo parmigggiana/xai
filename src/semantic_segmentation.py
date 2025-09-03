@@ -314,6 +314,9 @@ class MedicalSegmenter(nn.Module):
         profile_dir: str = "./outputs/profiling",
         debug: Optional[bool] = None,
         compile_model: bool = False,
+        # Validation performance knobs (opt-in; defaults preserve prior behavior)
+        val_max_batches: Optional[int] = None,
+        fast_val_metrics: bool = True,
     ):
         # If caller doesn't pass debug (None), use global DEBUG (if available);
         # otherwise, always respect the explicit value (True/False) passed in.
@@ -335,7 +338,7 @@ class MedicalSegmenter(nn.Module):
         except Exception:
             pass
 
-    # Configure TF32 and AMP dtype based on hardware support
+        # Configure TF32 and AMP dtype based on hardware support
         try:
             if device.type == "cuda":
                 # Allow TF32 matmul/conv on Ampere and newer (no-op on older GPUs)
@@ -360,7 +363,7 @@ class MedicalSegmenter(nn.Module):
         except Exception:
             self._amp_dtype = None
 
-    # Optionally compile the encoder for speed (CUDA-only)
+        # Optionally compile the encoder for speed (CUDA-only)
         if compile_model and device.type == "cuda" and hasattr(torch, "compile"):
             try:
                 # Prefer more aggressive autotuning on CUDA
@@ -369,7 +372,6 @@ class MedicalSegmenter(nn.Module):
                     print("   torch.compile enabled (encoder)")
             except Exception as e:
                 print(f"[compile] disabled (fallback): {e}")
-
 
         print(f"🚀 Starting training for {epochs} epochs")
         print(f"   Device: {device}")
@@ -566,10 +568,36 @@ class MedicalSegmenter(nn.Module):
                 epoch_val_dice = 0.0
 
                 with torch.no_grad():
+                    # Optional fast accumulator for Dice via confusion matrix
+                    fast_accum = None
+                    if fast_val_metrics:
+                        device_accum = device if device.type == "cuda" else "cpu"
+                        fast_accum = {
+                            "tp": torch.zeros(
+                                self.num_classes,
+                                dtype=torch.float64,
+                                device=device_accum,
+                            ),
+                            "fp": torch.zeros(
+                                self.num_classes,
+                                dtype=torch.float64,
+                                device=device_accum,
+                            ),
+                            "fn": torch.zeros(
+                                self.num_classes,
+                                dtype=torch.float64,
+                                device=device_accum,
+                            ),
+                        }
+
                     # Print a compact summary of a few validation batches (images, preds, labels)
                     for batch_idx, batch in enumerate(
                         tqdm(self.dataset.val_loader, desc="Validating")
                     ):
+                        if val_max_batches is not None and batch_idx >= int(
+                            val_max_batches
+                        ):
+                            break
                         if profile == "torch" and prof is not None:
                             try:
                                 prof.step()
@@ -603,28 +631,47 @@ class MedicalSegmenter(nn.Module):
 
                         preds = torch.argmax(outputs, dim=1, keepdim=True)
 
-                        # Convert to one-hot for metrics (C channels)
-                        try:
+                        if fast_val_metrics and fast_accum is not None:
+                            # Update confusion accumulators to avoid one-hot expansion
+                            try:
+                                p = preds.squeeze(1).to(dtype=torch.int64)
+                                y = labels.squeeze(1).to(dtype=torch.int64)
+                                K = int(self.num_classes)
+                                p = p.reshape(-1)
+                                y = y.reshape(-1)
+                                valid = (y >= 0) & (y < K)
+                                if valid.any():
+                                    idx = y[valid] * K + p[valid]
+                                    conf = torch.bincount(idx, minlength=K * K)
+                                    conf = conf.view(K, K).to(dtype=torch.float64)
+                                    tp = torch.diag(conf)
+                                    fp = conf.sum(dim=0) - tp
+                                    fn = conf.sum(dim=1) - tp
+                                    fast_accum["tp"] += tp
+                                    fast_accum["fp"] += fp
+                                    fast_accum["fn"] += fn
+                            except Exception:
+                                pass
+                        else:
+                            # Original MONAI metric path
+                            try:
 
-                            def _to_onehot(
-                                x: torch.Tensor, num_classes: int
-                            ) -> torch.Tensor:
-                                x = x.squeeze(1).long()
-                                oh = (
-                                    F.one_hot(x, num_classes=num_classes)
-                                    .movedim(-1, 1)
-                                    .float()
-                                )
-                                return oh
+                                def _to_onehot(
+                                    x: torch.Tensor, num_classes: int
+                                ) -> torch.Tensor:
+                                    x = x.squeeze(1).long()
+                                    oh = (
+                                        F.one_hot(x, num_classes=num_classes)
+                                        .movedim(-1, 1)
+                                        .float()
+                                    )
+                                    return oh
 
-                            preds_oh = _to_onehot(preds, self.num_classes)
-                            labels_oh = _to_onehot(labels, self.num_classes)
-                        except Exception:
-                            # Fallback: best-effort binary foreground vs background
-                            preds_oh = (preds > 0).float()
-                            labels_oh = (labels > 0).float()
-
-                        dice_metric(y_pred=preds_oh, y=labels_oh)
+                                preds_oh = _to_onehot(preds, self.num_classes)
+                                labels_oh = _to_onehot(labels, self.num_classes)
+                                dice_metric(y_pred=preds_oh, y=labels_oh)
+                            except Exception:
+                                pass
 
                         # Cache summary after each batch (validation) - removed verbose prints
 
@@ -646,14 +693,27 @@ class MedicalSegmenter(nn.Module):
                             pass
 
                     epoch_val_loss = float(np.mean(val_losses)) if val_losses else 0.0
-                    dice_result = dice_metric.aggregate()
-                    if isinstance(dice_result, tuple):
-                        epoch_val_dice = dice_result[0].mean().item()
-                    elif hasattr(dice_result, "numel") and dice_result.numel() > 1:
-                        epoch_val_dice = dice_result.mean().item()
+                    if fast_val_metrics and fast_accum is not None:
+                        eps = 1e-8
+                        tp = fast_accum["tp"].detach().cpu()
+                        fp = fast_accum["fp"].detach().cpu()
+                        fn = fast_accum["fn"].detach().cpu()
+                        # exclude background class 0 to match include_background=False
+                        if tp.numel() > 1:
+                            tp1, fp1, fn1 = tp[1:], fp[1:], fn[1:]
+                            dice_per_class = (2.0 * tp1) / (2.0 * tp1 + fp1 + fn1 + eps)
+                            epoch_val_dice = float(dice_per_class.mean().item())
+                        else:
+                            epoch_val_dice = 0.0
                     else:
-                        epoch_val_dice = float(dice_result)
-                    dice_metric.reset()
+                        dice_result = dice_metric.aggregate()
+                        if isinstance(dice_result, tuple):
+                            epoch_val_dice = dice_result[0].mean().item()
+                        elif hasattr(dice_result, "numel") and dice_result.numel() > 1:
+                            epoch_val_dice = dice_result.mean().item()
+                        else:
+                            epoch_val_dice = float(dice_result)
+                        dice_metric.reset()
 
                 history["val_loss"].append(epoch_val_loss)
                 history["val_dice"].append(epoch_val_dice)
@@ -951,6 +1011,10 @@ class MedicalSegmenter(nn.Module):
         visualize: bool = False,
         profile: bool | str = False,
         profile_dir: str = "./outputs/profiling",
+        # Evaluation performance knobs (opt-in)
+        max_batches_per_split: Optional[int] = None,
+        fast_metrics: bool = False,
+        compute_hausdorff: bool = True,
     ):
         """
         Evaluate the model and return metrics on both train and test loaders.
@@ -962,11 +1026,13 @@ class MedicalSegmenter(nn.Module):
         self.freeze()
 
         dice_metric = DiceMetric(include_background=False, reduction="mean")
-        hausdorff_metric = HausdorffDistanceMetric(
-            include_background=False,
-            reduction="none",
-            percentile=95,
-        )
+        hausdorff_metric = None
+        if compute_hausdorff:
+            hausdorff_metric = HausdorffDistanceMetric(
+                include_background=False,
+                reduction="none",
+                percentile=95,
+            )
 
         results = {}
 
@@ -1015,7 +1081,26 @@ class MedicalSegmenter(nn.Module):
                 prof_cm = contextlib.nullcontext()
 
             with torch.inference_mode(), prof_cm as prof:
+                # Optional fast accumulator
+                fast_accum = None
+                if fast_metrics:
+                    device_accum = device if device.type == "cuda" else "cpu"
+                    fast_accum = {
+                        "tp": torch.zeros(
+                            self.num_classes, dtype=torch.float64, device=device_accum
+                        ),
+                        "fp": torch.zeros(
+                            self.num_classes, dtype=torch.float64, device=device_accum
+                        ),
+                        "fn": torch.zeros(
+                            self.num_classes, dtype=torch.float64, device=device_accum
+                        ),
+                    }
                 for idx, batch in enumerate(tqdm(loader, desc=f"Evaluating {split}")):
+                    if max_batches_per_split is not None and idx >= int(
+                        max_batches_per_split
+                    ):
+                        break
                     if profile == "torch" and prof is not None:
                         try:
                             prof.step()
@@ -1049,22 +1134,47 @@ class MedicalSegmenter(nn.Module):
 
                     preds = torch.argmax(outputs, dim=1, keepdim=True)
 
-                    def _to_onehot(x: torch.Tensor, num_classes: int) -> torch.Tensor:
-                        x = x.squeeze(1).long()
-                        oh = (
-                            F.one_hot(x, num_classes=num_classes).movedim(-1, 1).float()
-                        )
-                        return oh
+                    if fast_metrics and fast_accum is not None:
+                        try:
+                            p = preds.squeeze(1).to(dtype=torch.int64)
+                            y = labels.squeeze(1).to(dtype=torch.int64)
+                            K = int(self.num_classes)
+                            p = p.reshape(-1)
+                            y = y.reshape(-1)
+                            valid = (y >= 0) & (y < K)
+                            if valid.any():
+                                idxs = y[valid] * K + p[valid]
+                                conf = torch.bincount(idxs, minlength=K * K)
+                                conf = conf.view(K, K).to(dtype=torch.float64)
+                                tp = torch.diag(conf)
+                                fp = conf.sum(dim=0) - tp
+                                fn = conf.sum(dim=1) - tp
+                                fast_accum["tp"] += tp
+                                fast_accum["fp"] += fp
+                                fast_accum["fn"] += fn
+                        except Exception:
+                            pass
+                    else:
 
-                    try:
-                        preds_oh = _to_onehot(preds, self.num_classes)
-                        labels_oh = _to_onehot(labels, self.num_classes)
-                    except Exception:
-                        preds_oh = (preds > 0).float()
-                        labels_oh = (labels > 0).float()
+                        def _to_onehot(
+                            x: torch.Tensor, num_classes: int
+                        ) -> torch.Tensor:
+                            x = x.squeeze(1).long()
+                            oh = (
+                                F.one_hot(x, num_classes=num_classes)
+                                .movedim(-1, 1)
+                                .float()
+                            )
+                            return oh
 
-                    dice_metric(y_pred=preds_oh, y=labels_oh)
-                    hausdorff_metric(y_pred=preds_oh, y=labels_oh)
+                        try:
+                            preds_oh = _to_onehot(preds, self.num_classes)
+                            labels_oh = _to_onehot(labels, self.num_classes)
+                            dice_metric(y_pred=preds_oh, y=labels_oh)
+                            if compute_hausdorff and hausdorff_metric is not None:
+                                hausdorff_metric(y_pred=preds_oh, y=labels_oh)
+                        except Exception:
+                            pass
 
                     if visualize and viz_images is None:
                         try:
@@ -1076,20 +1186,38 @@ class MedicalSegmenter(nn.Module):
 
             if has_labels:
                 try:
-                    dice_score = dice_metric.aggregate().item()
-                    hd_vals = hausdorff_metric.aggregate()
-                    if hasattr(hd_vals, "numel"):
-                        mask = torch.isfinite(hd_vals)
-                        if mask.any():
-                            hausdorff_dist = hd_vals[mask].mean().item()
+                    if fast_metrics and fast_accum is not None:
+                        eps = 1e-8
+                        tp = fast_accum["tp"].detach().cpu()
+                        fp = fast_accum["fp"].detach().cpu()
+                        fn = fast_accum["fn"].detach().cpu()
+                        if tp.numel() > 1:
+                            tp1, fp1, fn1 = tp[1:], fp[1:], fn[1:]
+                            dice_score = float(
+                                ((2.0 * tp1) / (2.0 * tp1 + fp1 + fn1 + eps))
+                                .mean()
+                                .item()
+                            )
                         else:
-                            hausdorff_dist = float("nan")
+                            dice_score = 0.0
+                        hausdorff_dist = None
                     else:
-                        hausdorff_dist = float(hd_vals)
+                        dice_score = dice_metric.aggregate().item()
+                        hausdorff_dist = None
+                        if compute_hausdorff and hausdorff_metric is not None:
+                            hd_vals = hausdorff_metric.aggregate()
+                            if hasattr(hd_vals, "numel"):
+                                mask = torch.isfinite(hd_vals)
+                                if mask.any():
+                                    hausdorff_dist = hd_vals[mask].mean().item()
+                                else:
+                                    hausdorff_dist = float("nan")
+                            else:
+                                hausdorff_dist = float(hd_vals)
 
                     results[split] = {"dice": dice_score, "hausdorff": hausdorff_dist}
                     print(
-                        f"✅ {split} - Dice: {dice_score:.4f}, Hausdorff: {hausdorff_dist:.4f}"
+                        f"✅ {split} - Dice: {dice_score:.4f}, Hausdorff: {hausdorff_dist if hausdorff_dist is not None else 'N/A'}"
                     )
                     if visualize and viz_images is not None:
                         try:
