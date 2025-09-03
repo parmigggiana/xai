@@ -3,14 +3,13 @@ import contextlib
 import os
 import zipfile
 from pathlib import Path
-from typing import OrderedDict, Tuple
+from typing import OrderedDict, Tuple, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import matplotlib.pyplot as plt
 from clip.model import CLIP
 from clipseg.clipseg import CLIPDensePredT
 from monai.apps import download_url
@@ -20,7 +19,6 @@ from monai.networks.nets import SwinUNETR
 from tqdm import tqdm
 
 from src.CLIPSeg import CLIPSeg
-from src.profiling import cprofile_ctx, torch_profiler_ctx, timer
 
 
 class MedicalSegmenter(nn.Module):
@@ -328,7 +326,12 @@ class MedicalSegmenter(nn.Module):
         early_stop_patience: int = 5,
         profile: bool | str = False,  # False | 'cprofile' | 'torch'
         profile_dir: str = "./outputs/profiling",
+        debug: Optional[bool] = None,
     ):
+        # If caller doesn't pass debug (None), use global DEBUG (if available);
+        # otherwise, always respect the explicit value (True/False) passed in.
+        if debug is None:
+            debug = False
         if self.dataset is None:
             raise ValueError("Dataset must be provided to finetune the model")
 
@@ -347,42 +350,48 @@ class MedicalSegmenter(nn.Module):
 
         print(f"🚀 Starting training for {epochs} epochs")
         print(f"   Device: {device}")
-        print(f"   Learning Rate: {learning_rate}")
-        print(f"   Weight Decay: {weight_decay}")
+        if debug:
+            print(f"   Learning Rate: {learning_rate}")
+            print(f"   Weight Decay: {weight_decay}")
 
         loss_function, dice_metric, optimizer, scaler = self._setup_training_components(
             learning_rate, weight_decay
         )
 
         # Debug: parameter counts and trainable modules
-        total_params = sum(p.numel() for p in self.parameters())
-        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        print(f"   Params: total={total_params:,}, trainable={trainable_params:,}")
+        if debug:
+            total_params = sum(p.numel() for p in self.parameters())
+            trainable_params = sum(
+                p.numel() for p in self.parameters() if p.requires_grad
+            )
+            print(f"   Params: total={total_params:,}, trainable={trainable_params:,}")
 
-        try:
-            n_train_batches = len(self.dataset.train_loader)
-            n_val_batches = len(self.dataset.val_loader)
-            print(f"   Batches: train={n_train_batches}, val={n_val_batches}")
-        except Exception:
-            pass
+        if debug:
+            try:
+                n_train_batches = len(self.dataset.train_loader)
+                n_val_batches = len(self.dataset.val_loader)
+                print(f"   Batches: train={n_train_batches}, val={n_val_batches}")
+            except Exception:
+                pass
 
-        # Choose a few tracked parameters (prefer head/out) to monitor updates
+        # Choose a few tracked parameters (prefer head/out) to monitor updates (debug only)
         tracked = []
-        for name, p in self.named_parameters():
-            if p.requires_grad and ("head" in name or ".out" in name):
-                tracked.append((name, p))
-            if len(tracked) >= 3:
-                break
-        if not tracked:
+        if debug:
             for name, p in self.named_parameters():
-                if p.requires_grad:
+                if p.requires_grad and ("head" in name or ".out" in name):
                     tracked.append((name, p))
                 if len(tracked) >= 3:
                     break
-        if tracked:
-            print("   Tracking params:")
-            for n, _ in tracked:
-                print(f"     - {n}")
+            if not tracked:
+                for name, p in self.named_parameters():
+                    if p.requires_grad:
+                        tracked.append((name, p))
+                    if len(tracked) >= 3:
+                        break
+            if tracked:
+                print("   Tracking params:")
+                for n, _ in tracked:
+                    print(f"     - {n}")
 
         history = {"train_loss": [], "val_loss": [], "val_dice": []}
 
@@ -392,22 +401,23 @@ class MedicalSegmenter(nn.Module):
         best_val_loss = float("inf")
         epochs_no_improve = 0
 
-        # Optional profilers
-        prof_cm = (
-            cprofile_ctx("train", out_dir=profile_dir)
-            if profile == "cprofile"
-            else (
-                torch_profiler_ctx(
-                    name="train",
-                    out_dir=profile_dir,
-                    wait=1,
-                    warmup=1,
-                    active=5,
-                )
-                if profile == "torch"
-                else contextlib.nullcontext()
+        # Optional profilers (opt-in, lazy import)
+        if profile == "cprofile":
+            from src.profiling import cprofile_ctx as _cprofile_ctx
+
+            prof_cm = _cprofile_ctx("train", out_dir=profile_dir)
+        elif profile == "torch":
+            from src.profiling import torch_profiler_ctx as _torch_profiler_ctx
+
+            prof_cm = _torch_profiler_ctx(
+                name="train",
+                out_dir=profile_dir,
+                wait=1,
+                warmup=1,
+                active=5,
             )
-        )
+        else:
+            prof_cm = contextlib.nullcontext()
 
         with prof_cm as prof:
             for epoch in range(epochs):
@@ -417,24 +427,42 @@ class MedicalSegmenter(nn.Module):
                 train_losses = []
 
                 # Debug: snapshot tracked param norms before epoch
-                pre_norms = {n: p.detach().float().norm().item() for n, p in tracked}
+                if debug and tracked:
+                    pre_norms = {
+                        n: p.detach().float().norm().item() for n, p in tracked
+                    }
+                else:
+                    pre_norms = {}
                 # Debug: epoch aggregates
-                epoch_unique_labels = set()
-                grad_nonzero_batches = 0
-                batch_count = 0
+                if debug:
+                    epoch_unique_labels = set()
+                    grad_nonzero_batches = 0
+                    batch_count = 0
 
                 # Debug: print current LR(s)
-                try:
-                    lrs = [pg.get("lr", None) for pg in optimizer.param_groups]
-                    print(
-                        f"   LR(s): {', '.join(f'{lr:.6e}' for lr in lrs if lr is not None)}"
-                    )
-                except Exception:
-                    pass
+                if debug:
+                    try:
+                        lrs = [pg.get("lr", None) for pg in optimizer.param_groups]
+                        print(
+                            f"   LR(s): {', '.join(f'{lr:.6e}' for lr in lrs if lr is not None)}"
+                        )
+                    except Exception:
+                        pass
+
+                # Lazy import timer only when debug is enabled to minimize overhead
+                if debug:
+                    from src.profiling import timer as _timer
+                else:
+                    _timer = None
 
                 train_pbar = tqdm(self.dataset.train_loader, desc="Training")
                 for batch_idx, batch in enumerate(train_pbar):
-                    with timer(f"batch {batch_idx}"):
+                    ctx = (
+                        _timer(f"batch {batch_idx}")
+                        if _timer
+                        else contextlib.nullcontext()
+                    )
+                    with ctx:
                         outputs, loss_value, success, dbg = (
                             self._process_training_batch(
                                 batch,
@@ -444,6 +472,7 @@ class MedicalSegmenter(nn.Module):
                                 scaler,
                                 max_grad_norm,
                                 batch_idx,
+                                compute_debug=debug,
                             )
                         )
 
@@ -453,18 +482,19 @@ class MedicalSegmenter(nn.Module):
                         train_pbar.set_postfix({"Loss": f"{avg_loss:.4f}"})
 
                         # Update epoch-level debug stats
-                        batch_count += 1
-                        if dbg is not None:
-                            if "unique_labels" in dbg:
-                                try:
-                                    epoch_unique_labels.update(
-                                        dbg["unique_labels"]
-                                    )  # list of ints
-                                except Exception:
-                                    pass
-                            if "grad_norm" in dbg and dbg["grad_norm"] is not None:
-                                if dbg["grad_norm"] > 0:
-                                    grad_nonzero_batches += 1
+                        if debug:
+                            batch_count += 1
+                            if dbg is not None:
+                                if "unique_labels" in dbg:
+                                    try:
+                                        epoch_unique_labels.update(
+                                            dbg["unique_labels"]
+                                        )  # list of ints
+                                    except Exception:
+                                        pass
+                                if "grad_norm" in dbg and dbg["grad_norm"] is not None:
+                                    if dbg["grad_norm"] > 0:
+                                        grad_nonzero_batches += 1
 
                 if train_losses:
                     epoch_train_loss = float(np.mean(train_losses))
@@ -472,36 +502,41 @@ class MedicalSegmenter(nn.Module):
                     print(f"Epoch {epoch+1} - Train Loss: {epoch_train_loss:.4f}")
 
                 # Debug: parameter update magnitudes on tracked params
-                post_norms = {n: p.detach().float().norm().item() for n, p in tracked}
-                if tracked:
-                    print("   Param norm deltas (after epoch):")
-                    for n in pre_norms:
-                        delta = post_norms[n] - pre_norms[n]
-                        print(
-                            f"     {n}: Δnorm={delta:+.6e} (before={pre_norms[n]:.6e}, after={post_norms[n]:.6e})"
-                        )
+                if debug and tracked:
+                    post_norms = {
+                        n: p.detach().float().norm().item() for n, p in tracked
+                    }
+                    if tracked:
+                        print("   Param norm deltas (after epoch):")
+                        for n in pre_norms:
+                            delta = post_norms[n] - pre_norms[n]
+                            print(
+                                f"     {n}: Δnorm={delta:+.6e} (before={pre_norms[n]:.6e}, after={post_norms[n]:.6e})"
+                            )
 
                 # Debug: epoch gradient non-zero ratio and label coverage
-                if batch_count > 0:
-                    ratio = grad_nonzero_batches / batch_count
-                    print(
-                        f"   Grad non-zero in batches: {grad_nonzero_batches}/{batch_count} ({ratio:.1%})"
-                    )
-                if epoch_unique_labels:
-                    try:
+                if debug:
+                    if batch_count > 0:
+                        ratio = grad_nonzero_batches / batch_count
                         print(
-                            f"   Labels seen this epoch: {sorted(list(epoch_unique_labels))}"
+                            f"   Grad non-zero in batches: {grad_nonzero_batches}/{batch_count} ({ratio:.1%})"
                         )
-                    except Exception:
-                        pass
+                    if epoch_unique_labels:
+                        try:
+                            print(
+                                f"   Labels seen this epoch: {sorted(list(epoch_unique_labels))}"
+                            )
+                        except Exception:
+                            pass
 
                 # Debug: AMP scaler
-                try:
-                    cur_scale = scaler.get_scale() if scaler is not None else None
-                    if cur_scale is not None:
-                        print(f"   GradScaler scale: {cur_scale}")
-                except Exception:
-                    pass
+                if debug:
+                    try:
+                        cur_scale = scaler.get_scale() if scaler is not None else None
+                        if cur_scale is not None:
+                            print(f"   GradScaler scale: {cur_scale}")
+                    except Exception:
+                        pass
 
                 self.eval()
                 val_losses = []
@@ -570,7 +605,7 @@ class MedicalSegmenter(nn.Module):
                         # Cache summary after each batch (validation) - removed verbose prints
 
                         # Print or visualize debug info (limit verbose output)
-                        if visualize_batches:
+                        if visualize_batches or debug:
                             try:
                                 self._visualize_batch(
                                     images,
@@ -607,7 +642,7 @@ class MedicalSegmenter(nn.Module):
                     best_model_state = {
                         k: v.cpu().clone() for k, v in self.state_dict().items()
                     }
-                    print(f"   ✅ New best Val Dice: {best_val_dice:.4f}")
+                    print(f"   New best Val Dice: {best_val_dice:.4f}")
 
                 # Early stopping check on validation loss
                 if epoch_val_loss < best_val_loss - 1e-6:
@@ -615,10 +650,12 @@ class MedicalSegmenter(nn.Module):
                     epochs_no_improve = 0
                 else:
                     epochs_no_improve += 1
-                    print(
-                        f"   ⏳ No Val Loss improvement: {epochs_no_improve}/{early_stop_patience}"
-                    )
+                    if debug:
+                        print(
+                            f"   No Val Loss improvement: {epochs_no_improve}/{early_stop_patience}"
+                        )
                     if epochs_no_improve >= early_stop_patience:
+
                         print(
                             f"Early stopping triggered: no Val Loss improvement for {early_stop_patience} epochs."
                         )
@@ -638,7 +675,6 @@ class MedicalSegmenter(nn.Module):
         class_weights = torch.ones(
             self.num_classes, dtype=torch.float32, device=self.device
         )
-        # class_weights[0] = 0.1  # Reduce background weight (adjust as needed)
         class_weights = torch.tensor(
             [0.4] + [1.0] * (self.num_classes - 1), device=self.device
         )
@@ -658,7 +694,7 @@ class MedicalSegmenter(nn.Module):
 
         # Setup optimizer
         optimizer = optim.AdamW(
-            self.parameters(), lr=learning_rate, weight_decay=weight_decay
+            self.parameters(), lr=learning_rate, weight_decay=weight_decay, fused=True
         )
 
         # Enable AMP GradScaler on CUDA
@@ -681,6 +717,7 @@ class MedicalSegmenter(nn.Module):
         scaler,
         max_grad_norm,
         batch_idx,
+        compute_debug: bool = False,
     ):
         """Process a single training batch with error handling."""
 
@@ -698,29 +735,6 @@ class MedicalSegmenter(nn.Module):
                 labels = labels.as_tensor()
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
-
-            # If dataset provides a decode mapping (e.g. CHAOS/MMWHS), apply it only when needed.
-            # Many preprocessing pipelines already decode; avoid double-decoding by checking dtype/range.
-            # if hasattr(self.dataset, "decode"):
-            #     try:
-            #         # If labels already look like class indices in [0, num_classes-1], skip decode.
-            #         is_long_int = labels.dtype == torch.long
-            #         max_val = int(labels.max().item()) if labels.numel() > 0 else 0
-            #         if not is_long_int and max_val < self.num_classes:
-            #             # float labels but already in class-range -> just cast to long
-            #             labels = labels.long()
-            #         elif is_long_int and max_val < self.num_classes:
-            #             # already good
-            #             pass
-            #         else:
-            #             # likely still encoded -> decode (ensure long)
-            #             labels = self.dataset.decode(labels).long()
-            #     except Exception:
-            #         # fallback: cast to long
-            #         labels = labels.long()
-            # else:
-            #     # No dataset decode function: ensure integer class indices
-            #     labels = labels.long()
 
             # Ensure labels are in correct format [B, 1, D, H, W]
             if self.encoder_type == "swin_unetr" and labels.dim() == 4:  # [B, D, H, W]
@@ -787,28 +801,37 @@ class MedicalSegmenter(nn.Module):
                         pass
                 optimizer.step()
 
-            # Prepare debug info (compute grad norm without clipping if needed)
-            total_norm = None
-            try:
-                total_norm = 0.0
-                param_count = 0
-                for p in self.parameters():
-                    if p.grad is not None:
-                        param_norm = p.grad.data.norm(2)
-                        total_norm += param_norm.item() ** 2
-                        param_count += 1
-                if param_count > 0:
-                    total_norm = total_norm ** (1.0 / 2)
-            except Exception:
+            # Prepare debug info only when requested to minimize overhead
+            if compute_debug:
                 total_norm = None
+                try:
+                    total_norm = 0.0
+                    param_count = 0
+                    for p in self.parameters():
+                        if p.grad is not None:
+                            param_norm = p.grad.data.norm(2)
+                            total_norm += param_norm.item() ** 2
+                            param_count += 1
+                    if param_count > 0:
+                        total_norm = total_norm ** (1.0 / 2)
+                except Exception:
+                    total_norm = None
 
-            dbg = {
-                "batch_idx": batch_idx,
-                "grad_norm": float(total_norm) if total_norm is not None else None,
-                "unique_labels": [
-                    int(x) for x in np.unique(labels.detach().cpu().numpy()).tolist()
-                ],
-            }
+                try:
+                    uniq_labels = [
+                        int(x)
+                        for x in np.unique(labels.detach().cpu().numpy()).tolist()
+                    ]
+                except Exception:
+                    uniq_labels = []
+
+                dbg = {
+                    "batch_idx": batch_idx,
+                    "grad_norm": float(total_norm) if total_norm is not None else None,
+                    "unique_labels": uniq_labels,
+                }
+            else:
+                dbg = None
 
             # Clean up intermediate tensors
             del images, labels
@@ -839,6 +862,9 @@ class MedicalSegmenter(nn.Module):
 
         Expects images: [B, C, H, W] or [B, 1, H, W]; preds/labels: [B, 1, H, W] (class indices).
         """
+        # Defer heavy imports to avoid overhead when visualization is disabled
+        import matplotlib.pyplot as plt
+
         imgs = images.detach().cpu()
         p = preds.detach().cpu()
         labels_cpu = labels.detach().cpu()
@@ -859,7 +885,7 @@ class MedicalSegmenter(nn.Module):
         if lab.ndim > 2:
             lab = lab.squeeze(0)
 
-        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+        _, axes = plt.subplots(1, 3, figsize=(12, 4))
         axes[0].imshow(img, cmap="gray")
         axes[0].set_title(f"{title} - image")
         axes[0].axis("off")
@@ -916,18 +942,19 @@ class MedicalSegmenter(nn.Module):
             # Hold a single batch to visualize after finishing the split
             viz_images = viz_preds = viz_labels = None
 
-            # Optional torch profiler per split
-            prof_cm = (
-                torch_profiler_ctx(
+            # Optional torch profiler per split (opt-in, lazy import)
+            if profile == "torch":
+                from src.profiling import torch_profiler_ctx as _torch_profiler_ctx
+
+                prof_cm = _torch_profiler_ctx(
                     name=f"eval-{split}",
                     out_dir=profile_dir,
                     wait=1,
                     warmup=1,
                     active=5,
                 )
-                if profile == "torch"
-                else contextlib.nullcontext()
-            )
+            else:
+                prof_cm = contextlib.nullcontext()
 
             with torch.inference_mode(), prof_cm as prof:
                 for idx, batch in enumerate(tqdm(loader, desc=f"Evaluating {split}")):

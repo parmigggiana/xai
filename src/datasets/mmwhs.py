@@ -201,10 +201,6 @@ class MMWHS(BaseDataset):
         # Calculate split sizes
         train_size = int(total_samples * train_ratio)
         val_size = int(total_samples * val_ratio)
-        test_size = total_samples - train_size - val_size  # Remaining samples
-
-        print(f"Dataset {domain} total samples: {total_samples}")
-        print(f"Split sizes - Train: {train_size}, Val: {val_size}, Test: {test_size}")
 
         # Create reproducible random indices
         import random
@@ -264,7 +260,7 @@ class MMWHS(BaseDataset):
             train_loader_kwargs.update(
                 {
                     "persistent_workers": True,
-                    "prefetch_factor": 2,
+                    "prefetch_factor": 4,
                 }
             )
         self.train_loader = DataLoader(self.train_dataset, **train_loader_kwargs)
@@ -280,7 +276,7 @@ class MMWHS(BaseDataset):
             val_loader_kwargs.update(
                 {
                     "persistent_workers": True,
-                    "prefetch_factor": 2,
+                    "prefetch_factor": 4,
                 }
             )
         self.val_loader = DataLoader(self.val_dataset, **val_loader_kwargs)
@@ -297,7 +293,7 @@ class MMWHS(BaseDataset):
             test_loader_kwargs.update(
                 {
                     "persistent_workers": True,
-                    "prefetch_factor": 2,
+                    "prefetch_factor": 4,
                 }
             )
         self.test_loader = DataLoader(self.test_dataset, **test_loader_kwargs)

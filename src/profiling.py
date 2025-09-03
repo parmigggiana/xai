@@ -12,6 +12,10 @@ import json
 import csv
 
 
+# Default output directory for profiling artifacts
+DEFAULT_PROFILING_DIR = "./outputs/profiling"
+
+
 def _ensure_dir(path: str | os.PathLike) -> Path:
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
@@ -19,7 +23,9 @@ def _ensure_dir(path: str | os.PathLike) -> Path:
 
 
 @contextlib.contextmanager
-def cprofile_ctx(name: str, out_dir: str = "./outputs/profiling") -> Iterator[cProfile.Profile]:
+def cprofile_ctx(
+    name: str, out_dir: str = DEFAULT_PROFILING_DIR
+) -> Iterator[cProfile.Profile]:
     """Context manager to run cProfile and write .prof and .txt summary.
 
     Args:
@@ -47,7 +53,7 @@ def cprofile_ctx(name: str, out_dir: str = "./outputs/profiling") -> Iterator[cP
 @contextlib.contextmanager
 def torch_profiler_ctx(
     name: str,
-    out_dir: str = "./outputs/profiling",
+    out_dir: str = DEFAULT_PROFILING_DIR,
     wait: int = 1,
     warmup: int = 1,
     active: int = 5,
@@ -78,7 +84,9 @@ def torch_profiler_ctx(
             else:
                 raise ValueError(f"Unknown profiler activity: {a}")
 
-    schedule = torch.profiler.schedule(wait=wait, warmup=warmup, active=active, repeat=1)
+    schedule = torch.profiler.schedule(
+        wait=wait, warmup=warmup, active=active, repeat=1
+    )
 
     prof = torch.profiler.profile(
         activities=acts,
@@ -114,7 +122,9 @@ def timer(name: str = "block") -> Iterator[float]:
         print(f"[timer] {name}: {elapsed:.3f}s")
 
 
-def summarize_preprocess_logs(log_dir: str = "./outputs/profiling", out_csv: str | None = None) -> str:
+def summarize_preprocess_logs(
+    log_dir: str = DEFAULT_PROFILING_DIR, out_csv: str | None = None
+) -> str:
     """Aggregate preprocessing JSONL logs (preprocess-*.jsonl) into a CSV.
 
     Each JSONL line is expected to be produced by ImageDataset._profiling_log.
