@@ -314,8 +314,8 @@ class MedicalSegmenter(nn.Module):
         profile_dir: str = "./outputs/profiling",
         debug: Optional[bool] = None,
         compile_model: bool = False,
-        # Validation performance knobs (opt-in; defaults preserve prior behavior)
-        val_max_batches: Optional[int] = None,
+        # Validation performance knobs
+        val_max_batches: Optional[int] = 16,
         fast_val_metrics: bool = True,
     ):
         # If caller doesn't pass debug (None), use global DEBUG (if available);
@@ -1011,8 +1011,8 @@ class MedicalSegmenter(nn.Module):
         profile_dir: str = "./outputs/profiling",
         # Evaluation performance knobs (opt-in)
         max_batches_per_split: Optional[int] = None,
-        fast_metrics: bool = False,
-        compute_hausdorff: bool = True,
+        fast_metrics: bool = True,
+        compute_hausdorff: bool = False,
     ):
         """
         Evaluate the model and return metrics on both train and test loaders.
