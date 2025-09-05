@@ -102,6 +102,10 @@ class CLIPSeg(nn.Module):
 
         self.clipseg = CLIPDensePredT(version=version, **default_kwargs)
 
+        # CPU-side caches to avoid recomputing/retokenizing text each step (always enabled)
+        self._avg_prompt_embed_cpu = {}
+        self._class_text_embed_cpu = {}
+
         # Setup class mapping
         self.num_classes = len(self.classes) + (1 if self.background_class else 0)
         self.class_to_idx = {
@@ -168,7 +172,37 @@ class CLIPSeg(nn.Module):
             lambda c: f"medical imaging of {c}.",
             lambda c: f"radiological image showing {c}.",
         ]
+        print("WARNING: Using fallback medical templates for class:", class_name)
         return [template(class_name) for template in fallback_templates]
+
+    def _get_avg_prompt_embedding(
+        self, class_name: str, device: torch.device
+    ) -> torch.Tensor:
+        """Return averaged medical prompt embedding for a class, with CPU caching.
+
+        - Uses `generate_medical_prompts` to build a set of prompts for the class.
+        - Computes text embeddings with `self.clipseg.compute_conditional`.
+        - Caches the averaged embedding on CPU and moves it to the requested device on use.
+        """
+        # Return cached CPU embedding moved to target device
+        cached = self._avg_prompt_embed_cpu.get(class_name)
+        if cached is not None:
+            return cached.to(device)
+
+        prompts = self.generate_medical_prompts(class_name)
+        embeds: List[torch.Tensor] = []
+        for prompt in prompts:
+            emb = self.clipseg.compute_conditional(prompt)
+            if not isinstance(emb, torch.Tensor):
+                emb = torch.as_tensor(emb)
+            emb = emb.detach().cpu().float()
+            # Flatten to 1D if needed (implementation may return [1, D] or [D])
+            embeds.append(emb.view(-1))
+
+        # Average and keep as [1, D] for conditioning
+        avg = torch.stack(embeds, dim=0).mean(dim=0, keepdim=True).contiguous()
+        self._avg_prompt_embed_cpu[class_name] = avg  # cache on CPU
+        return avg.to(device)
 
     def predict_single_class_with_medical_prompts(
         self, image: torch.Tensor, class_name: str
@@ -181,27 +215,10 @@ class CLIPSeg(nn.Module):
                 f"Class '{class_name}' not in initialized classes: {self.classes}"
             )
 
-        # Generate medical prompts for this class
-        medical_prompts = self.generate_medical_prompts(class_name)
-
-        # Compute embeddings for all medical prompts without tracking grads
-        embeddings = []
-        with torch.no_grad():
-            for prompt in medical_prompts:
-                # Use CLIPSeg's text encoding
-                emb = self.clipseg.compute_conditional(prompt)
-                if not isinstance(emb, torch.Tensor):
-                    emb = torch.tensor(emb).to(image.device)
-                if emb.dim() == 1:
-                    emb = emb.unsqueeze(0)
-                embeddings.append(emb)
-
-        # Average the embeddings from all templates (constant w.r.t. image)
-        avg_embedding = torch.stack(embeddings).mean(dim=0).to(image.device)
-
-        # Run the segmentation forward pass WITH gradients enabled
-        pred = self.clipseg(image, conditional=avg_embedding)[0]  # logits
-        # pred = torch.sigmoid(pred)
+        # Get (cached) averaged embedding for this class
+        avg_embedding = self._get_avg_prompt_embedding(class_name, device=image.device)
+        # Run the segmentation forward pass and convert logits to probabilities
+        pred = self.clipseg(image, conditional=avg_embedding)[0]
 
         # Resize if needed
         if pred.shape[2:] != image.shape[2:]:
@@ -220,35 +237,29 @@ class CLIPSeg(nn.Module):
 
         Args:
             image: Input image tensor (B, C, H, W)
-            return_individual: Whether to return individual class predictions
-            return_probabilities: Whether to return probabilities instead of class indices
 
         Returns:
             Segmentation map (B, num_classes, H, W) where first channel is background
         """
         height, width = image.shape[2], image.shape[3]
-
-        # Get predictions for each foreground class
-        class_predictions = {}
         foreground_predictions = []
 
         for cls in self.classes:
-            # Use medical prompts for better conditioning
             if self.medical_templates or self.dataset_info:
-                # Use medical-specific prompts
+                # Use cached medical prompt embedding
                 pred = self.predict_single_class_with_medical_prompts(image, cls)
             else:
                 # Fallback to original CLIPSeg behavior
                 pred = self.clipseg(image, cls)[0]  # (B, 1, H, W)
-                pred = torch.sigmoid(pred)  # Convert to probabilities
 
-                # Resize to original image size if needed
-                if pred.shape[2:] != (height, width):
-                    pred = F.interpolate(
-                        pred, size=(height, width), mode="bilinear", align_corners=False
-                    )
+            pred = torch.sigmoid(pred)  # Convert to probabilities
 
-            class_predictions[cls] = pred
+            # Resize to original image size if needed
+            if pred.shape[2:] != (height, width):
+                pred = F.interpolate(
+                    pred, size=(height, width), mode="bilinear", align_corners=False
+                )
+
             foreground_predictions.append(pred)
 
         # Stack foreground predictions (B, num_foreground_classes, H, W)

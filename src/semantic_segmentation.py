@@ -379,11 +379,12 @@ class MedicalSegmenter(nn.Module):
             print(f"   Learning Rate: {learning_rate}")
             print(f"   Weight Decay: {weight_decay}")
 
-        loss_function, dice_metric, optimizer, scaler = self._setup_training_components(
+        loss_function, optimizer, scaler = self._setup_training_components(
             learning_rate, weight_decay
         )
 
         # Debug: parameter counts and trainable modules
+        tracked = []
         if debug:
             total_params = sum(p.numel() for p in self.parameters())
             trainable_params = sum(
@@ -391,7 +392,6 @@ class MedicalSegmenter(nn.Module):
             )
             print(f"   Params: total={total_params:,}, trainable={trainable_params:,}")
 
-        if debug:
             try:
                 n_train_batches = len(self.dataset.train_loader)
                 n_val_batches = len(self.dataset.val_loader)
@@ -399,9 +399,7 @@ class MedicalSegmenter(nn.Module):
             except Exception:
                 pass
 
-        # Choose a few tracked parameters (prefer head/out) to monitor updates (debug only)
-        tracked = []
-        if debug:
+            # Choose a few tracked parameters (prefer head/out) to monitor updates (debug only)
             for name, p in self.named_parameters():
                 if p.requires_grad and ("head" in name or ".out" in name):
                     tracked.append((name, p))
@@ -418,9 +416,8 @@ class MedicalSegmenter(nn.Module):
                 for n, _ in tracked:
                     print(f"     - {n}")
 
-        history = {"train_loss": [], "val_loss": [], "val_dice": []}
+        history = {"train_loss": [], "val_loss": []}
 
-        best_val_dice = 0.0
         best_model_state = None
         # Early stopping state (track best by validation loss)
         best_val_loss = float("inf")
@@ -554,8 +551,7 @@ class MedicalSegmenter(nn.Module):
                         except Exception:
                             pass
 
-                # Debug: AMP scaler
-                if debug:
+                    # Debug: AMP scaler
                     try:
                         cur_scale = scaler.get_scale() if scaler is not None else None
                         if cur_scale is not None:
@@ -565,30 +561,8 @@ class MedicalSegmenter(nn.Module):
 
                 self.eval()
                 val_losses = []
-                epoch_val_dice = 0.0
 
-                with torch.no_grad():
-                    # Optional fast accumulator for Dice via confusion matrix
-                    fast_accum = None
-                    if fast_val_metrics:
-                        device_accum = device if device.type == "cuda" else "cpu"
-                        fast_accum = {
-                            "tp": torch.zeros(
-                                self.num_classes,
-                                dtype=torch.float64,
-                                device=device_accum,
-                            ),
-                            "fp": torch.zeros(
-                                self.num_classes,
-                                dtype=torch.float64,
-                                device=device_accum,
-                            ),
-                            "fn": torch.zeros(
-                                self.num_classes,
-                                dtype=torch.float64,
-                                device=device_accum,
-                            ),
-                        }
+                with torch.inference_mode():
 
                     # Print a compact summary of a few validation batches (images, preds, labels)
                     for batch_idx, batch in enumerate(
@@ -631,48 +605,6 @@ class MedicalSegmenter(nn.Module):
 
                         preds = torch.argmax(outputs, dim=1, keepdim=True)
 
-                        if fast_val_metrics and fast_accum is not None:
-                            # Update confusion accumulators to avoid one-hot expansion
-                            try:
-                                p = preds.squeeze(1).to(dtype=torch.int64)
-                                y = labels.squeeze(1).to(dtype=torch.int64)
-                                K = int(self.num_classes)
-                                p = p.reshape(-1)
-                                y = y.reshape(-1)
-                                valid = (y >= 0) & (y < K)
-                                if valid.any():
-                                    idx = y[valid] * K + p[valid]
-                                    conf = torch.bincount(idx, minlength=K * K)
-                                    conf = conf.view(K, K).to(dtype=torch.float64)
-                                    tp = torch.diag(conf)
-                                    fp = conf.sum(dim=0) - tp
-                                    fn = conf.sum(dim=1) - tp
-                                    fast_accum["tp"] += tp
-                                    fast_accum["fp"] += fp
-                                    fast_accum["fn"] += fn
-                            except Exception:
-                                pass
-                        else:
-                            # Original MONAI metric path
-                            try:
-
-                                def _to_onehot(
-                                    x: torch.Tensor, num_classes: int
-                                ) -> torch.Tensor:
-                                    x = x.squeeze(1).long()
-                                    oh = (
-                                        F.one_hot(x, num_classes=num_classes)
-                                        .movedim(-1, 1)
-                                        .float()
-                                    )
-                                    return oh
-
-                                preds_oh = _to_onehot(preds, self.num_classes)
-                                labels_oh = _to_onehot(labels, self.num_classes)
-                                dice_metric(y_pred=preds_oh, y=labels_oh)
-                            except Exception:
-                                pass
-
                         # Cache summary after each batch (validation) - removed verbose prints
 
                         # Print or visualize debug info (limit verbose output)
@@ -693,43 +625,18 @@ class MedicalSegmenter(nn.Module):
                             pass
 
                     epoch_val_loss = float(np.mean(val_losses)) if val_losses else 0.0
-                    if fast_val_metrics and fast_accum is not None:
-                        eps = 1e-8
-                        tp = fast_accum["tp"].detach().cpu()
-                        fp = fast_accum["fp"].detach().cpu()
-                        fn = fast_accum["fn"].detach().cpu()
-                        # exclude background class 0 to match include_background=False
-                        if tp.numel() > 1:
-                            tp1, fp1, fn1 = tp[1:], fp[1:], fn[1:]
-                            dice_per_class = (2.0 * tp1) / (2.0 * tp1 + fp1 + fn1 + eps)
-                            epoch_val_dice = float(dice_per_class.mean().item())
-                        else:
-                            epoch_val_dice = 0.0
-                    else:
-                        dice_result = dice_metric.aggregate()
-                        if isinstance(dice_result, tuple):
-                            epoch_val_dice = dice_result[0].mean().item()
-                        elif hasattr(dice_result, "numel") and dice_result.numel() > 1:
-                            epoch_val_dice = dice_result.mean().item()
-                        else:
-                            epoch_val_dice = float(dice_result)
-                        dice_metric.reset()
 
                 history["val_loss"].append(epoch_val_loss)
-                history["val_dice"].append(epoch_val_dice)
-                print(
-                    f"Epoch {epoch+1} - Val Loss: {epoch_val_loss:.4f}, Val Dice: {epoch_val_dice:.4f}"
-                )
+                print(f"Epoch {epoch+1} - Val Loss: {epoch_val_loss:.4f}")
 
-                if save_best and epoch_val_dice > best_val_dice:
-                    best_val_dice = epoch_val_dice
-                    best_model_state = {
-                        k: v.cpu().clone() for k, v in self.state_dict().items()
-                    }
-                    print(f"   New best Val Dice: {best_val_dice:.4f}")
-
-                # Early stopping check on validation loss
-                if epoch_val_loss < best_val_loss - 1e-6:
+                # Save best and early stopping based on validation loss only
+                improved = epoch_val_loss < best_val_loss - 1e-6
+                if improved:
+                    if save_best:
+                        best_model_state = {
+                            k: v.cpu().clone() for k, v in self.state_dict().items()
+                        }
+                        print(f"   New best Val Loss: {epoch_val_loss:.4f}")
                     best_val_loss = epoch_val_loss
                     epochs_no_improve = 0
                 else:
@@ -739,7 +646,6 @@ class MedicalSegmenter(nn.Module):
                             f"   No Val Loss improvement: {epochs_no_improve}/{early_stop_patience}"
                         )
                     if epochs_no_improve >= early_stop_patience:
-
                         print(
                             f"Early stopping triggered: no Val Loss improvement for {early_stop_patience} epochs."
                         )
@@ -771,9 +677,6 @@ class MedicalSegmenter(nn.Module):
             weight=class_weights,
         )
 
-        # Setup metrics
-        dice_metric = DiceMetric(include_background=False, reduction="mean")
-
         # Setup optimizer
         # AdamW fused fallback (CPU or older PyTorch may not support 'fused')
         if self.device.type == "cuda":
@@ -804,7 +707,7 @@ class MedicalSegmenter(nn.Module):
         else:
             scaler = None
 
-        return loss_function, dice_metric, optimizer, scaler
+        return loss_function, optimizer, scaler
 
     def _process_training_batch(
         self,
