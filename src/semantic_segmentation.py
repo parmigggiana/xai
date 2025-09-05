@@ -84,7 +84,6 @@ class MedicalSegmenter(nn.Module):
                 dst.unlink(missing_ok=True)
 
             print("🔄 Loading CLIPSeg weights...")
-            from transformers import CLIPTextModel, CLIPVisionModel
 
             state_dict = torch.load(
                 "data/clipseg_weights/rd64-uni-refined.pth",
@@ -259,6 +258,40 @@ class MedicalSegmenter(nn.Module):
         for param in self.encoder.parameters():
             param.requires_grad = True
 
+    # --- Optional fine-grained freezing for CLIPSeg encoders ---
+    def freeze_text_encoder(self):
+        """Freeze CLIP text encoder parameters (when using CLIPSeg).
+
+        This avoids tracking/updating the CLIP text tower which isn't on the
+        training graph when using cached, detached text embeddings.
+        """
+        if getattr(self, "encoder_type", None) != "clipseg":
+            return
+        frozen = 0
+        for name, p in self.encoder.named_parameters():
+            # In CLIPSeg, text params live under 'clip_model.' but not under '.visual.'
+            if "clip_model." in name and ".visual." not in name:
+                if p.requires_grad:
+                    p.requires_grad = False
+                    frozen += 1
+        if frozen:
+            print(
+                f"Frozen {frozen} CLIP text-encoder params (kept visual+head trainable)."
+            )
+
+    def unfreeze_text_encoder(self):
+        """Unfreeze CLIP text encoder parameters (when using CLIPSeg)."""
+        if getattr(self, "encoder_type", None) != "clipseg":
+            return
+        unfrozen = 0
+        for name, p in self.encoder.named_parameters():
+            if "clip_model." in name and ".visual." not in name:
+                if not p.requires_grad:
+                    p.requires_grad = True
+                    unfrozen += 1
+        if unfrozen:
+            print(f"Unfrozen {unfrozen} CLIP text-encoder params.")
+
     def _unpack_batch(self, batch):
         """Return (images, labels) from either a dict-style MONAI batch or a tuple/list.
         Falls back to common alternative keys when using dict-based datasets.
@@ -362,7 +395,7 @@ class MedicalSegmenter(nn.Module):
             print(f"   Weight Decay: {weight_decay}")
 
         loss_function, optimizer, scaler = self._setup_training_components(
-            learning_rate, weight_decay
+            learning_rate, weight_decay, debug=debug
         )
 
         # Debug: parameter counts and trainable modules
@@ -499,6 +532,23 @@ class MedicalSegmenter(nn.Module):
                                 if "grad_norm" in dbg and dbg["grad_norm"] is not None:
                                     if dbg["grad_norm"] > 0:
                                         grad_nonzero_batches += 1
+
+                                try:
+                                    layer_grads = dbg.get("layer_grad_sums")
+                                    if layer_grads is not None:
+                                        compact = ", ".join(
+                                            (
+                                                f"{name}: {val:.3e}"
+                                                if val is not None
+                                                else f"{name}: None"
+                                            )
+                                            for name, val in layer_grads.items()
+                                        )
+                                        print(
+                                            f"      step {batch_idx}: |grad| sums -> {compact}"
+                                        )
+                                except Exception:
+                                    pass
 
                 if train_losses:
                     epoch_train_loss = float(np.mean(train_losses))
@@ -640,7 +690,7 @@ class MedicalSegmenter(nn.Module):
         print("\n✅ Training completed!")
         return history
 
-    def _setup_training_components(self, learning_rate, weight_decay):
+    def _setup_training_components(self, learning_rate, weight_decay, debug=False):
         """Setup loss function, metrics, optimizer, and scaler for training."""
         # Setup loss function (memory-efficient configuration)
         # Custom class weights: reduce background weight (assume background is excluded, so we add 1)
@@ -653,30 +703,35 @@ class MedicalSegmenter(nn.Module):
         loss_function = DiceCELoss(
             include_background=True,
             to_onehot_y=True,
-            # softmax=True,  # True for logits input; False if already probabilities
+            # softmax=True,  # False because CLIPSeg outputs are already probabilities
             # lambda_dice=0.7,
             # lambda_ce=0.3,
             weight=class_weights,
         )
 
-        # Setup optimizer
+        # Setup optimizer (only include params that require grad)
+        trainable_params = [p for p in self.parameters() if p.requires_grad]
+        if debug:
+            print(
+                f"   Trainable params: {len(trainable_params)} of {len(list(self.parameters()))}"
+            )
         # AdamW fused fallback (CPU or older PyTorch may not support 'fused')
         if self.device.type == "cuda":
             try:
                 optimizer = optim.AdamW(
-                    self.parameters(),
+                    trainable_params,
                     lr=learning_rate,
                     weight_decay=weight_decay,
                     fused=True,
                 )
             except (TypeError, RuntimeError):
                 optimizer = optim.AdamW(
-                    self.parameters(), lr=learning_rate, weight_decay=weight_decay
+                    trainable_params, lr=learning_rate, weight_decay=weight_decay
                 )
         else:
             # Do not pass 'fused' on CPU to avoid unsupported-arg errors
             optimizer = optim.AdamW(
-                self.parameters(), lr=learning_rate, weight_decay=weight_decay
+                trainable_params, lr=learning_rate, weight_decay=weight_decay
             )
 
         # Enable AMP GradScaler on CUDA only for FP16; BF16 does not need GradScaler
@@ -813,10 +868,52 @@ class MedicalSegmenter(nn.Module):
                 except Exception:
                     uniq_labels = []
 
+                # Per-step gradient sums for a few representative layers
+                layer_grad_sums = None
+
+                # Summary counts: trainable vs. with gradients this step
+                grad_counts = None
+                try:
+                    trainable_cnt = 0
+                    grad_present_cnt = 0
+                    for p in self.parameters():
+                        if p.requires_grad:
+                            trainable_cnt += 1
+                            if p.grad is not None:
+                                grad_present_cnt += 1
+                    grad_counts = {
+                        "trainable": trainable_cnt,
+                        "with_grad": grad_present_cnt,
+                    }
+                except Exception:
+                    grad_counts = None
+
+                # Optimizer coverage check on the first debug batch
+                opt_cov = None
+                try:
+                    if batch_idx == 0:
+                        opt_ids = {
+                            id(p)
+                            for g in optimizer.param_groups
+                            for p in g.get("params", [])
+                        }
+                        req_ids = {id(p) for p in self.parameters() if p.requires_grad}
+                        missing = len(req_ids - opt_ids)
+                        extra = len(opt_ids - req_ids)
+                        opt_cov = {
+                            "trainable_not_in_opt": missing,
+                            "opt_not_trainable": extra,
+                        }
+                except Exception:
+                    opt_cov = None
+
                 dbg = {
                     "batch_idx": batch_idx,
                     "grad_norm": float(total_norm) if total_norm is not None else None,
                     "unique_labels": uniq_labels,
+                    "layer_grad_sums": layer_grad_sums,
+                    "grad_counts": grad_counts,
+                    "optimizer_coverage": opt_cov,
                 }
             else:
                 dbg = None
