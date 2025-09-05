@@ -1,16 +1,12 @@
-import itertools
+import math
 from typing import Dict, List, Optional, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from clipseg.clipseg import CLIPDensePredT as _CLIPDensePredT
-import types
-
-import math
-import torch
-from torch.nn import functional as nnf
 from clipseg.clipseg import forward_multihead_attention
+from torch.nn import functional as nnf
 
 
 class GradCLIPDensePredT(_CLIPDensePredT):
