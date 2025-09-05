@@ -10,8 +10,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from clip.model import CLIP
-from clipseg.clipseg import CLIPDensePredT
 from monai.apps import download_url
 from monai.losses import DiceCELoss
 from monai.metrics import DiceMetric, HausdorffDistanceMetric
@@ -88,30 +86,14 @@ class MedicalSegmenter(nn.Module):
             print("🔄 Loading CLIPSeg weights...")
             from transformers import CLIPTextModel, CLIPVisionModel
 
-            safe_globals = [
-                CLIPDensePredT,
-                CLIP,
-                CLIPVisionModel,
-                CLIPTextModel,
-                torch.nn.Module,
-                torch.nn.Conv2d,
-                torch.nn.Linear,
-                torch.nn.BatchNorm2d,
-                torch.nn.LayerNorm,
-                torch.nn.Dropout,
-                torch.nn.ReLU,
-                torch.nn.GELU,
-            ]
-
-            with torch.serialization.safe_globals(safe_globals=safe_globals):
-                state_dict = torch.load(
-                    "data/clipseg_weights/rd64-uni-refined.pth",
-                    map_location=torch.device(
-                        "cuda" if torch.cuda.is_available() else "cpu"
-                    ),
-                    weights_only=False,
-                )
-                model.clipseg.load_state_dict(state_dict, strict=False)
+            state_dict = torch.load(
+                "data/clipseg_weights/rd64-uni-refined.pth",
+                map_location=torch.device(
+                    "cuda" if torch.cuda.is_available() else "cpu"
+                ),
+                weights_only=False,
+            )
+            model.clipseg.load_state_dict(state_dict, strict=False)
 
             self.encoder = model
             self.head = model.head
