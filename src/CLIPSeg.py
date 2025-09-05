@@ -478,18 +478,3 @@ class CLIPSeg(nn.Module):
     def parameters(self, recurse=True):
         # include both the internal CLIPDensePredT params and the custom head params
         return self.clipseg.parameters(recurse=recurse)
-
-
-def create_chaos_ct_clipseg(**kwargs) -> CLIPSeg:
-    """Create CLIPSeg wrapper for CHAOS CT dataset classes."""
-    chaos_ct_classes = ["liver", "kidney_right", "kidney_left", "spleen"]
-
-    # Default weights favoring organ detection (background handled separately)
-    default_kwargs = {
-        "aggregation_mode": "argmax",
-        "background_class": True,
-        "version": "ViT-B/16",
-    }
-    default_kwargs.update(kwargs)
-
-    return CLIPSeg(classes=chaos_ct_classes, **default_kwargs)
