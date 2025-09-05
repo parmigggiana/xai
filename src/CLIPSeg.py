@@ -201,9 +201,8 @@ class CLIPSeg(nn.Module):
         # Initialize CLIPSeg model
         default_kwargs = {
             "extract_layers": (3, 6, 9),
-            "reduce_dim": 64,  # Reduced from 128
-            "prompt": "shuffle+",
-            "complex_trans_conv": True,
+            "reduce_dim": 64,
+            # "complex_trans_conv": True,
         }
         default_kwargs.update(kwargs)
 
@@ -222,34 +221,6 @@ class CLIPSeg(nn.Module):
         }
         if self.background_class:
             self.class_to_idx["background"] = 0
-
-        # Create segmentation head - contains all layers responsible for final prediction
-        self.head = nn.ModuleDict(
-            {
-                # Core CLIPSeg segmentation components
-                "clip_visual": self.clipseg.model,  # CLIP visual encoder
-                "reduces": self.clipseg.reduces,  # Feature reduction layers
-                "blocks": self.clipseg.blocks,  # Transformer encoder blocks
-                "extra_blocks": self.clipseg.extra_blocks,  # Additional transformer blocks
-                "trans_conv": self.clipseg.trans_conv,  # Main segmentation head (transposed conv)
-                # Text conditioning components
-                "film_mul": self.clipseg.film_mul,  # FiLM multiplicative conditioning
-                "film_add": self.clipseg.film_add,  # FiLM additive conditioning
-            }
-        )
-
-        # Add optional components if they exist
-        if (
-            hasattr(self.clipseg, "reduce_cond")
-            and self.clipseg.reduce_cond is not None
-        ):
-            self.head["reduce_cond"] = self.clipseg.reduce_cond
-
-        if (
-            hasattr(self.clipseg, "upsample_proj")
-            and self.clipseg.upsample_proj is not None
-        ):
-            self.head["upsample_proj"] = self.clipseg.upsample_proj
 
     def generate_medical_prompts(self, class_name: str) -> List[str]:
         """
@@ -416,60 +387,6 @@ class CLIPSeg(nn.Module):
         if self.background_class:
             return ["background"] + self.classes
         return self.classes
-
-    def get_head_parameters(self):
-        """Get all parameters from the segmentation head."""
-        return self.head.parameters()
-
-    def get_head_named_parameters(self):
-        """Get all named parameters from the segmentation head."""
-        return self.head.named_parameters()
-
-    def freeze_backbone(self):
-        """Freeze the CLIP visual backbone, keeping only head trainable."""
-        for param in self.head["clip_visual"].parameters():
-            param.requires_grad = False
-        print("Frozen CLIP visual backbone. Only segmentation head is trainable.")
-
-    def unfreeze_backbone(self):
-        """Unfreeze the CLIP visual backbone."""
-        for param in self.head["clip_visual"].parameters():
-            param.requires_grad = True
-        print("Unfrozen CLIP visual backbone. All parameters are trainable.")
-
-    def get_head_layer_names(self) -> List[str]:
-        """Get names of all layers in the segmentation head."""
-        return list(self.head.keys())
-
-    def print_head_summary(self):
-        """Print a summary of the segmentation head architecture."""
-        print("\n" + "=" * 50)
-        print("SEGMENTATION HEAD ARCHITECTURE")
-        print("=" * 50)
-
-        total_params = 0
-        trainable_params = 0
-
-        for name, module in self.head.items():
-            module_params = sum(p.numel() for p in module.parameters())
-            module_trainable = sum(
-                p.numel() for p in module.parameters() if p.requires_grad
-            )
-
-            print(
-                f"{name:15} | {str(type(module).__name__):20} | "
-                f"Params: {module_params:8,} | Trainable: {module_trainable:8,}"
-            )
-
-            total_params += module_params
-            trainable_params += module_trainable
-
-        print("-" * 50)
-        print(
-            f"{'TOTAL':15} | {'':20} | "
-            f"Params: {total_params:8,} | Trainable: {trainable_params:8,}"
-        )
-        print("=" * 50)
 
     def parameters(self, recurse=True):
         # include both the internal CLIPDensePredT params and the custom head params

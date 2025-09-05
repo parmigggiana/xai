@@ -54,7 +54,6 @@ class MedicalSegmenter(nn.Module):
             )
             if pretrained:
                 self._load_swinvit_weights()
-            self.head = self.encoder.out
 
         elif encoder_type == "clipseg":
             # Extract dataset information for medical template selection
@@ -92,10 +91,61 @@ class MedicalSegmenter(nn.Module):
                 ),
                 weights_only=False,
             )
-            model.clipseg.load_state_dict(state_dict, strict=False)
+
+            #### Debug: compare keys before loading
+            # model_state = model.clipseg.state_dict()
+            # sd_keys = set(state_dict.keys())
+            # model_keys = set(model_state.keys())
+            # unexpected = sorted(sd_keys - model_keys)
+            # missing = sorted(model_keys - sd_keys)
+
+            # # Attempt to load with strict=False to allow partial matches
+            # load_result = model.clipseg.load_state_dict(state_dict, strict=False)
+
+            # # Summary of key matching
+            # matched = len(sd_keys & model_keys)
+            # print("model state keys:", len(model_keys))
+            # print("checkpoint state keys:", len(sd_keys))
+            # print(
+            #     f"CLIPSeg weight load summary: matched={matched}, "
+            #     f"missing={len(missing)}, unexpected={len(unexpected)}"
+            # )
+
+            # # Print missing and unexpected keys (limit output length)
+            # if load_result.missing_keys:
+            #     print(f"Missing keys ({len(load_result.missing_keys)}):")
+            #     for k in load_result.missing_keys[:25]:
+            #         print(f"  - {k}")
+            #     if len(load_result.missing_keys) > 25:
+            #         print(f"  ... and {len(load_result.missing_keys) - 25} more")
+
+            # if load_result.unexpected_keys:
+            #     print(f"Unexpected keys ({len(load_result.unexpected_keys)}):")
+            #     for k in load_result.unexpected_keys[:25]:
+            #         print(f"  - {k}")
+            #     if len(load_result.unexpected_keys) > 25:
+            #         print(f"  ... and {len(load_result.unexpected_keys) - 25} more")
+
+            # # Extra: detect any size mismatches among intersecting keys
+            # size_mismatches = []
+            # for k in sd_keys & model_keys:
+            #     try:
+            #         sd_shape = tuple(state_dict[k].shape)  # type: ignore[attr-defined]
+            #         mdl_shape = tuple(model_state[k].shape)  # type: ignore[attr-defined]
+            #         if sd_shape != mdl_shape:
+            #             size_mismatches.append((k, sd_shape, mdl_shape))
+            #     except Exception:
+            #         # If an entry isn't a Tensor-like with shape, skip it
+            #         continue
+            # if size_mismatches:
+            #     print(f"Size-mismatched tensors ({len(size_mismatches)}):")
+            #     for k, s1, s2 in size_mismatches[:25]:
+            #         print(f"  - {k}: checkpoint {s1} != model {s2}")
+            #     if len(size_mismatches) > 25:
+            #         print(f"  ... and {len(size_mismatches) - 25} more")
+            #### Debug end
 
             self.encoder = model
-            self.head = model.head
 
         else:
             raise ValueError(
@@ -241,15 +291,6 @@ class MedicalSegmenter(nn.Module):
         """
         return self.forward(x)
 
-    def freeze_head(self):
-        for param in self.head.parameters():
-            param.requires_grad = False
-
-    def freeze_body(self):
-        self.freeze()
-        for param in self.head.parameters():
-            param.requires_grad = True
-
     def freeze(self):
         for param in self.encoder.parameters():
             param.requires_grad = False
@@ -267,17 +308,11 @@ class MedicalSegmenter(nn.Module):
         """
         if getattr(self, "encoder_type", None) != "clipseg":
             return
-        frozen = 0
         for name, p in self.encoder.named_parameters():
             # In CLIPSeg, text params live under 'clip_model.' but not under '.visual.'
             if "clip_model." in name and ".visual." not in name:
                 if p.requires_grad:
                     p.requires_grad = False
-                    frozen += 1
-        if frozen:
-            print(
-                f"Frozen {frozen} CLIP text-encoder params (kept visual+head trainable)."
-            )
 
     def unfreeze_text_encoder(self):
         """Unfreeze CLIP text encoder parameters (when using CLIPSeg)."""
