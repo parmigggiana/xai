@@ -4,7 +4,118 @@ from typing import Dict, List, Optional, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from clipseg.clipseg import CLIPDensePredT
+from clipseg.clipseg import CLIPDensePredT as _CLIPDensePredT
+import types
+
+import math
+import torch
+from torch.nn import functional as nnf
+from clipseg.clipseg import forward_multihead_attention
+
+
+class GradCLIPDensePredT(_CLIPDensePredT):
+    """CLIPDensePredT variant that allows gradients through visual_forward.
+
+    This mirrors the library behavior but removes the torch.no_grad() wrapper
+    so the visual tower participates in backprop.
+    """
+
+    def visual_forward(self, x_inp, extract_layers=(), skip=False, mask=None):
+        # Copied structure: call the parent implementation but without no_grad.
+
+        inp_size = x_inp.shape[2:]
+
+        if self.n_tokens is not None:
+            stride2 = x_inp.shape[2] // self.n_tokens
+            conv_weight2 = nnf.interpolate(
+                self.model.conv1.weight,
+                (stride2, stride2),
+                mode="bilinear",
+                align_corners=True,
+            )
+            x = nnf.conv2d(
+                x_inp,
+                conv_weight2,
+                bias=self.model.conv1.bias,
+                stride=stride2,
+                dilation=self.model.conv1.dilation,
+            )
+        else:
+            x = self.model.conv1(x_inp)  # shape = [*, width, grid, grid]
+
+        x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
+        x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
+
+        x = torch.cat(
+            [
+                self.model.class_embedding.to(x.dtype)
+                + torch.zeros(
+                    x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device
+                ),
+                x,
+            ],
+            dim=1,
+        )  # shape = [*, grid ** 2 + 1, width]
+
+        standard_n_tokens = 50 if self.model.conv1.kernel_size[0] == 32 else 197
+
+        if x.shape[1] != standard_n_tokens:
+            new_shape = int(math.sqrt(x.shape[1] - 1))
+            x = (
+                x
+                + self.rescaled_pos_emb((new_shape, new_shape)).to(x.dtype)[None, :, :]
+            )
+        else:
+            x = x + self.model.positional_embedding.to(x.dtype)
+
+        x = self.model.ln_pre(x)
+
+        x = x.permute(1, 0, 2)  # NLD -> LND
+
+        activations, affinities = [], []
+        for i, res_block in enumerate(self.model.transformer.resblocks):
+
+            if mask is not None:
+                mask_layer, mask_type, mask_tensor = mask
+                if mask_layer == i or mask_layer == "all":
+                    # import ipdb; ipdb.set_trace()
+                    size = int(math.sqrt(x.shape[0] - 1))
+
+                    attn_mask = (
+                        mask_type,
+                        nnf.interpolate(
+                            mask_tensor.unsqueeze(1).float(), (size, size)
+                        ).view(mask_tensor.shape[0], size * size),
+                    )
+
+                else:
+                    attn_mask = None
+            else:
+                attn_mask = None
+
+            x, aff_per_head = forward_multihead_attention(
+                x, res_block, with_aff=True, attn_mask=attn_mask
+            )
+
+            if i in extract_layers:
+                affinities += [aff_per_head]
+
+                # if self.n_tokens is not None:
+                #    activations += [nnf.interpolate(x, inp_size, mode='bilinear', align_corners=True)]
+                # else:
+                activations += [x]
+
+            if len(extract_layers) > 0 and i == max(extract_layers) and skip:
+                print("early skip")
+                break
+
+        x = x.permute(1, 0, 2)  # LND -> NLD
+        x = self.model.ln_post(x[:, 0, :])
+
+        if self.model.proj is not None:
+            x = x @ self.model.proj
+
+        return x, activations, affinities
 
 
 class CLIPSeg(nn.Module):
@@ -100,7 +211,8 @@ class CLIPSeg(nn.Module):
         }
         default_kwargs.update(kwargs)
 
-        self.clipseg = CLIPDensePredT(version=version, **default_kwargs)
+        # Use the grad-enabled variant so visual features get gradients during finetuning
+        self.clipseg = GradCLIPDensePredT(version=version, **default_kwargs)
 
         # CPU-side caches to avoid recomputing/retokenizing text each step (always enabled)
         self._avg_prompt_embed_cpu = {}
@@ -365,10 +477,7 @@ class CLIPSeg(nn.Module):
 
     def parameters(self, recurse=True):
         # include both the internal CLIPDensePredT params and the custom head params
-        return itertools.chain(
-            self.clipseg.parameters(recurse=recurse),
-            self.head.parameters(recurse=recurse),
-        )
+        return self.clipseg.parameters(recurse=recurse)
 
 
 def create_chaos_ct_clipseg(**kwargs) -> CLIPSeg:
