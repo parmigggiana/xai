@@ -653,7 +653,7 @@ class MedicalSegmenter(nn.Module):
         loss_function = DiceCELoss(
             include_background=True,
             to_onehot_y=True,
-            softmax=True,  # True for logits input; False if already probabilities
+            # softmax=True,  # True for logits input; False if already probabilities
             # lambda_dice=0.7,
             # lambda_ce=0.3,
             weight=class_weights,
