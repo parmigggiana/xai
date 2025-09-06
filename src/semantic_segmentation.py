@@ -731,41 +731,58 @@ class MedicalSegmenter(nn.Module):
         class_weights = torch.ones(
             self.num_classes, dtype=torch.float32, device=self.device
         )
-        class_weights[0] = 0.1  # Reduce background weight
+        class_weights[0] = 0.2  # Reduce background weight
 
         # CLIPSeg produces sigmoids / probability-like outputs; do not apply softmax again.
         loss_function = DiceCELoss(
-            include_background=True,
+            include_background=False,
             to_onehot_y=True,
-            # softmax=True,  # False because CLIPSeg outputs are already probabilities
+            softmax=True,
             # lambda_dice=0.7,
             # lambda_ce=0.3,
-            weight=class_weights,
+            # weight=class_weights,
         )
 
-        # Setup optimizer (only include params that require grad)
-        trainable_params = [p for p in self.parameters() if p.requires_grad]
+        # Setup optimizer with separate LR for backbone vs decoder (backbone = 0.1x)
+        param_groups, grouping_dbg = self._build_param_groups(
+            base_lr=learning_rate, weight_decay=weight_decay
+        )
+
         if debug:
-            print(
-                f"   Trainable params: {len(trainable_params)} of {len(list(self.parameters()))}"
-            )
+            try:
+                total = sum(1 for _ in self.parameters())
+                trainable = sum(1 for p in self.parameters() if p.requires_grad)
+                print(f"   Trainable params: {trainable} of {total}")
+                print(
+                    "   Optimizer groups: "
+                    + ", ".join(
+                        f"{k}={v}" for k, v in grouping_dbg.items() if k != "patterns"
+                    )
+                )
+                if "patterns" in grouping_dbg:
+                    print(
+                        f"   Grouping patterns -> backbone: {grouping_dbg['patterns']['backbone']} | decoder: other trainable"
+                    )
+            except Exception:
+                pass
+
         # AdamW fused fallback (CPU or older PyTorch may not support 'fused')
         if self.device.type == "cuda":
             try:
                 optimizer = optim.AdamW(
-                    trainable_params,
+                    param_groups,
                     lr=learning_rate,
                     weight_decay=weight_decay,
                     fused=True,
                 )
             except (TypeError, RuntimeError):
                 optimizer = optim.AdamW(
-                    trainable_params, lr=learning_rate, weight_decay=weight_decay
+                    param_groups, lr=learning_rate, weight_decay=weight_decay
                 )
         else:
             # Do not pass 'fused' on CPU to avoid unsupported-arg errors
             optimizer = optim.AdamW(
-                trainable_params, lr=learning_rate, weight_decay=weight_decay
+                param_groups, lr=learning_rate, weight_decay=weight_decay
             )
 
         # Enable AMP GradScaler on CUDA only for FP16; BF16 does not need GradScaler
@@ -779,6 +796,79 @@ class MedicalSegmenter(nn.Module):
             scaler = None
 
         return loss_function, optimizer, scaler
+
+    def _build_param_groups(self, base_lr: float, weight_decay: float):
+        """Return optimizer param groups with LR multiplier on backbone.
+
+        Policy: decoder uses base_lr; backbone uses 0.1 * base_lr.
+        Backbone/decoder split is inferred from stable name patterns per encoder type:
+          - swin_unetr: backbone params start with 'encoder.swinViT.'
+          - clipseg:    backbone params start with 'encoder.clipseg.model.'
+        All other trainable params are treated as decoder.
+        """
+        # Choose patterns
+        if self.encoder_type == "swin_unetr":
+            backbone_patterns = ("encoder.swinViT.",)
+        elif self.encoder_type == "clipseg":
+            backbone_patterns = ("encoder.clipseg.clip_model.",)
+        else:
+            backbone_patterns = ()
+
+        backbone_params = []
+        decoder_params = []
+
+        for name, p in self.named_parameters():
+            if not p.requires_grad:
+                continue
+            if any(name.startswith(pref) for pref in backbone_patterns):
+                backbone_params.append(p)
+            else:
+                decoder_params.append(p)
+
+        # Fallbacks to avoid empty groups
+        if not decoder_params and backbone_params:
+            # Unusual: if everything matched backbone, keep small group for backbone
+            pass
+        elif decoder_params and not backbone_params:
+            # If we failed to detect backbone, treat all as decoder (single group)
+            param_groups = [
+                {
+                    "params": decoder_params,
+                    "lr": base_lr,
+                    "weight_decay": weight_decay,
+                }
+            ]
+            dbg = {
+                "decoder_params": len(decoder_params),
+                "backbone_params": 0,
+                "patterns": {"backbone": backbone_patterns},
+            }
+            return param_groups, dbg
+
+        param_groups = []
+        if decoder_params:
+            param_groups.append(
+                {
+                    "params": decoder_params,
+                    "lr": base_lr,
+                    "weight_decay": weight_decay,
+                }
+            )
+        if backbone_params:
+            param_groups.append(
+                {
+                    "params": backbone_params,
+                    "lr": base_lr * 0.1,
+                    "weight_decay": weight_decay * 0.1,
+                }
+            )
+
+        dbg = {
+            "decoder_params": len(decoder_params),
+            "backbone_params": len(backbone_params),
+            "patterns": {"backbone": backbone_patterns},
+        }
+        return param_groups, dbg
 
     def _process_training_batch(
         self,

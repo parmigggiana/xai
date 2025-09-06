@@ -200,7 +200,7 @@ class CLIPSeg(nn.Module):
 
         # Initialize CLIPSeg model
         default_kwargs = {
-            "extract_layers": (3, 6, 9),
+            "extract_layers": (2, 5, 9),
             "reduce_dim": 64,
             # "complex_trans_conv": True,
         }
@@ -321,7 +321,9 @@ class CLIPSeg(nn.Module):
             Segmentation map (B, num_classes, H, W) where first channel is background
         """
         height, width = image.shape[2], image.shape[3]
-        foreground_predictions = []
+        foreground_predictions = [
+            torch.zeros_like(image[:, :1, :, :]),
+        ]  # Dummy background class if needed
 
         for cls in self.classes:
             if self.medical_templates or self.dataset_info:
@@ -331,7 +333,7 @@ class CLIPSeg(nn.Module):
                 # Fallback to original CLIPSeg behavior
                 pred = self.clipseg(image, cls)[0]  # (B, 1, H, W)
 
-            pred = torch.sigmoid(pred)  # Convert to probabilities
+            # pred = torch.sigmoid(pred)  # Convert to probabilities
 
             # Resize to original image size if needed
             if pred.shape[2:] != (height, width):
@@ -340,23 +342,24 @@ class CLIPSeg(nn.Module):
                 )
 
             foreground_predictions.append(pred)
-
+        # print(f"Number of foreground predictions: {len(foreground_predictions)}")
         # Stack foreground predictions (B, num_foreground_classes, H, W)
         foreground_stack = torch.cat(foreground_predictions, dim=1)
-
+        # print(foreground_stack.shape)
+        return foreground_stack
         # Compute background as 1 - max(foreground_classes)
         # Background probability is high where no foreground class is confident
-        max_foreground, _ = torch.max(
-            foreground_stack, dim=1, keepdim=True
-        )  # (B, 1, H, W)
-        background_pred = 1.0 - max_foreground  # (B, 1, H, W)
+        # max_foreground, _ = torch.max(
+        #     foreground_stack, dim=1, keepdim=True
+        # )  # (B, 1, H, W)
+        # background_pred = 1.0 - max_foreground  # (B, 1, H, W)
 
         # Combine background (first) + foreground predictions
-        all_predictions = torch.cat(
-            [background_pred, foreground_stack], dim=1
-        )  # (B, num_classes, H, W)
+        # all_predictions = torch.cat(
+        #     [background_pred, foreground_stack], dim=1
+        # )  # (B, num_classes, H, W)
 
-        return all_predictions
+        # return all_predictions
 
     def predict_single_class(
         self, image: torch.Tensor, class_name: str
