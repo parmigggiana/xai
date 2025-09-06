@@ -365,8 +365,7 @@ class MedicalSegmenter(nn.Module):
         debug: Optional[bool] = None,
         compile_model: bool = False,
         # Validation performance knobs
-        val_max_batches: Optional[int] = 16,
-        fast_val_metrics: bool = True,
+        val_max_batches: Optional[int] = None,
     ):
         # If caller doesn't pass debug (None), use global DEBUG (if available);
         # otherwise, always respect the explicit value (True/False) passed in.
