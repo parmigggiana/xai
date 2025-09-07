@@ -366,6 +366,10 @@ class MedicalSegmenter(nn.Module):
         compile_model: bool = False,
         # Validation performance knobs
         val_max_batches: Optional[int] = None,
+        # Learning rate schedule: linearly decay from lr_start to lr_end over lr_decay_epochs
+        lr_start: float = 1e-3,
+        lr_end: float = 1e-4,
+        lr_decay_epochs: int = 20,
     ):
         # If caller doesn't pass debug (None), use global DEBUG (if available);
         # otherwise, always respect the explicit value (True/False) passed in.
@@ -424,13 +428,36 @@ class MedicalSegmenter(nn.Module):
 
         print(f"🚀 Starting training for {epochs} epochs")
         print(f"   Device: {device}")
+        # Fixed 5-epoch warmup for stability
+        warmup_epochs = 5
         if debug:
-            print(f"   Learning Rate: {learning_rate}")
+            print(
+                f"   LR: 5-epoch warmup -> cosine decay: start={lr_start:.3e} -> end={lr_end:.3e} over {lr_decay_epochs} epochs (warmup={warmup_epochs})"
+            )
             print(f"   Weight Decay: {weight_decay}")
 
+        # Initialize optimizer at starting LR
+        init_lr = lr_start
         loss_function, optimizer, scaler = self._setup_training_components(
-            learning_rate, weight_decay, debug=debug
+            init_lr, weight_decay, debug=debug
         )
+
+        # Warmup + Cosine LR schedule (epoch-based). Clamp after decay window.
+        # Warmup: linear ramp to lr_start over `warmup_epochs`.
+        # Cosine: lr(e) = lr_end + 0.5*(lr_start - lr_end)*(1 + cos(pi * t)), t in [0,1]
+        def _lr_at_epoch(e: int) -> float:
+            # Linear warmup
+            w = max(0, int(warmup_epochs))
+            if w > 0 and e < w:
+                # Start near-0 and ramp to lr_start by end of warmup
+                return lr_start * float(e + 1) / float(w)
+
+            # Cosine decay after warmup
+            steps = max(1, int(lr_decay_epochs))
+            # Progress t from 0 at the first post-warmup epoch to 1 at the end of decay window
+            idx = max(0, min(e - w, steps))
+            t = idx / float(steps)
+            return lr_end + 0.5 * (lr_start - lr_end) * (1.0 + np.cos(np.pi * t))
 
         # Debug: parameter counts and trainable modules
         tracked = []
@@ -493,6 +520,15 @@ class MedicalSegmenter(nn.Module):
         with prof_cm as prof:
             for epoch in range(epochs):
                 print(f"\n📖 Epoch {epoch + 1}/{epochs}")
+
+                # Apply scheduled LR at the start of the epoch
+                try:
+                    new_base_lr = _lr_at_epoch(epoch)
+                    for pg in optimizer.param_groups:
+                        factor = pg.get("lr_factor", 1.0)
+                        pg["lr"] = new_base_lr * float(factor)
+                except Exception:
+                    pass
 
                 self.train()
                 train_losses = []
@@ -857,6 +893,7 @@ class MedicalSegmenter(nn.Module):
                     "params": decoder_params,
                     "lr": base_lr,
                     "weight_decay": weight_decay,
+                    "lr_factor": 1.0,
                 }
             )
         if backbone_params:
@@ -865,9 +902,9 @@ class MedicalSegmenter(nn.Module):
                     "params": backbone_params,
                     "lr": base_lr * 0.1,
                     "weight_decay": weight_decay * 0.1,
+                    "lr_factor": 0.1,
                 }
             )
-
         dbg = {
             "decoder_params": len(decoder_params),
             "backbone_params": len(backbone_params),
