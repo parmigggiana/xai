@@ -153,9 +153,8 @@ class MMWHS(BaseDataset):
         val_ratio=0.15,
         test_ratio=0.15,
         random_seed=42,
-        # passthrough knobs for ImageDataset caching behavior
-        cache_max_items: int | None = None,
-        enable_cache: bool | None = None,
+        # tiny in-memory LRU cache for repeated volume reads when slicing
+        volume_cache_size: int = 16,
     ):
         """
         MMWHS Dataset with proper train/validation/test splitting.
@@ -190,6 +189,7 @@ class MMWHS(BaseDataset):
             transform=transform,
             seg_transform=seg_transform,
             slice_2d=slice_2d,
+            volume_cache_size=volume_cache_size,
         )
 
         # Get total number of samples
@@ -219,6 +219,7 @@ class MMWHS(BaseDataset):
             transform=transform,
             seg_transform=seg_transform,
             slice_2d=slice_2d,
+            volume_cache_size=volume_cache_size,
         )
 
         self.val_dataset = PyTorchMMWHS(
@@ -228,6 +229,7 @@ class MMWHS(BaseDataset):
             transform=transform,
             seg_transform=seg_transform,
             slice_2d=slice_2d,
+            volume_cache_size=volume_cache_size,
         )
 
         self.test_dataset = PyTorchMMWHS(
@@ -237,6 +239,7 @@ class MMWHS(BaseDataset):
             transform=transform,
             seg_transform=seg_transform,
             slice_2d=slice_2d,
+            volume_cache_size=volume_cache_size,
         )
 
         # Create DataLoaders

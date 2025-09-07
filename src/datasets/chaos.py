@@ -167,9 +167,6 @@ class CHAOS(BaseDataset):
         val_ratio=0.15,
         test_ratio=0.15,
         random_seed=42,
-        # passthrough knobs for ImageDataset caching behavior
-        cache_max_items: int | None = None,
-        enable_cache: bool | None = None,
     ):
         """
         CHAOS Dataset with proper train/validation/test splitting.

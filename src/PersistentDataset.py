@@ -17,9 +17,10 @@ import sys
 import tempfile
 import warnings
 from collections.abc import Callable, Sequence
+from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -408,6 +409,7 @@ class LoadPathOrSliceD(MapTransform):
         readers: dict[str, Any],
         dtype: Any = np.float32,
         loader_kwargs: dict[str, dict] | None = None,
+        volume_cache_size: Optional[int] = None,
     ) -> None:
         super().__init__(keys)
         loader_kwargs = loader_kwargs or {}
@@ -415,6 +417,34 @@ class LoadPathOrSliceD(MapTransform):
         for k in keys:
             kwargs = loader_kwargs.get(k, {})
             self._loaders[k] = LoadImage(readers.get(k), False, dtype, **kwargs)
+        # tiny in-memory LRU for recently used volumes (by file path)
+        if volume_cache_size is None:
+            self._cache_size = 0
+        else:
+            self._cache_size = max(0, int(volume_cache_size))
+        self._vol_cache: OrderedDict[str, tuple[Any, dict | None]] = OrderedDict()
+
+    def _cache_get(self, path: str) -> tuple[Any, dict | None] | None:
+        if self._cache_size <= 0:
+            return None
+        p = str(path)
+        if p in self._vol_cache:
+            img_meta = self._vol_cache.pop(p)
+            # re-insert as most-recent
+            self._vol_cache[p] = img_meta
+            return img_meta
+        return None
+
+    def _cache_put(self, path: str, img: Any, meta: dict | None) -> None:
+        if self._cache_size <= 0:
+            return
+        p = str(path)
+        if p in self._vol_cache:
+            self._vol_cache.pop(p)
+        self._vol_cache[p] = (img, meta)
+        while len(self._vol_cache) > self._cache_size:
+            # evict least-recently used
+            self._vol_cache.popitem(last=False)
 
     def __call__(self, data: dict) -> dict:
         d = dict(data)
@@ -426,7 +456,17 @@ class LoadPathOrSliceD(MapTransform):
             path = val
             if isinstance(val, tuple) and len(val) == 2:
                 path, slice_idx = val
-            img, meta = self._loaders[key](path)
+            # try in-memory cache first (only if enabled)
+            if self._cache_size > 0:
+                cached = self._cache_get(path)
+                if cached is not None:
+                    img, meta = cached
+                else:
+                    img, meta = self._loaders[key](path)
+                    # store the full volume and its metadata for subsequent slices
+                    self._cache_put(path, img, meta if isinstance(meta, dict) else None)
+            else:
+                img, meta = self._loaders[key](path)
             if slice_idx is not None and hasattr(img, "shape") and len(img.shape) >= 3:
                 aff = None
                 if isinstance(meta, dict):
@@ -436,13 +476,38 @@ class LoadPathOrSliceD(MapTransform):
                         aff = meta.get("original_affine", None)
                     if isinstance(aff, torch.Tensor):
                         aff = aff.detach().cpu().numpy()
-                img = img[..., int(slice_idx)]
+                # extract 2D slice and detach from cached buffer to avoid aliasing
+                img2d = img[..., int(slice_idx)]
+                try:
+                    img2d = img2d.copy()
+                except Exception:
+                    pass
                 if isinstance(meta, dict):
+                    new_meta = dict(meta)  # shallow copy
                     affine2d = _build_2d_affine_from_3d(aff, int(slice_idx))
-                    meta["affine"] = affine2d
-                    meta["original_affine"] = affine2d
-                    meta["spatial_shape"] = np.asarray(img.shape[-2:], dtype=np.int64)
-            d[key] = MetaTensor(img, meta=meta) if isinstance(meta, dict) else img
+                    new_meta["affine"] = affine2d
+                    new_meta["original_affine"] = affine2d
+                    new_meta["spatial_shape"] = np.asarray(
+                        img2d.shape[-2:], dtype=np.int64
+                    )
+                    d[key] = MetaTensor(img2d, meta=new_meta)
+                else:
+                    d[key] = img2d
+            else:
+                # return a safe copy to avoid modifying cached volume downstream
+                base = img
+                try:
+                    if hasattr(base, "clone"):
+                        base = base.clone()
+                    else:
+                        base = np.array(base)
+                except Exception:
+                    pass
+                d[key] = (
+                    MetaTensor(base, meta=dict(meta))
+                    if isinstance(meta, dict)
+                    else base
+                )
         return d
 
 
@@ -483,6 +548,7 @@ class ImageLabelPersistentDataset(PersistentDataset):
         cache_dir: Path | str | None = None,
         dtype: Any = np.float32,
         loader_kwargs: dict[str, dict] | None = None,
+        volume_cache_size: int = 0,
     ) -> None:
         if seg_files is not None and len(image_files) != len(seg_files):
             raise ValueError(
@@ -510,6 +576,7 @@ class ImageLabelPersistentDataset(PersistentDataset):
                     readers=readers,
                     dtype=dtype,
                     loader_kwargs=loader_kwargs,
+                    volume_cache_size=volume_cache_size,
                 ),
                 ApplyToKey("image", transform),
                 ApplyToKey("label", seg_transform),
