@@ -628,6 +628,11 @@ class MedicalSegmenter(nn.Module):
                 self.eval()
                 val_losses = []
 
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+
                 with torch.inference_mode():
 
                     # Print a compact summary of a few validation batches (images, preds, labels)
