@@ -23,27 +23,20 @@ from typing import Any
 
 import numpy as np
 import torch
-from torch.serialization import DEFAULT_PROTOCOL
-from torch.utils.data import Dataset as _TorchDataset
-from torch.utils.data import Subset
-
 from monai.data.meta_tensor import MetaTensor
-from monai.data.utils import (
-    SUPPORTED_PICKLE_MOD,
-    pickle_hashing,
-)
+from monai.data.utils import SUPPORTED_PICKLE_MOD, pickle_hashing
 from monai.transforms import (
     Compose,
+    LoadImage,
+    MapTransform,
     RandomizableTrait,
     Transform,
     reset_ops_id,
-    MapTransform,
-    LoadImage,
 )
-from monai.utils import (
-    look_up_option,
-    optional_import,
-)
+from monai.utils import look_up_option, optional_import
+from torch.serialization import DEFAULT_PROTOCOL
+from torch.utils.data import Dataset as _TorchDataset
+from torch.utils.data import Subset
 
 cp, _ = optional_import("cupy")
 lmdb, _ = optional_import("lmdb")

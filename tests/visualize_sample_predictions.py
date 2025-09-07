@@ -14,9 +14,9 @@ import sys
 sys.path.append("../")
 
 
-from pathlib import Path
 import argparse
 import random
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import matplotlib.pyplot as plt

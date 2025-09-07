@@ -7,8 +7,8 @@ from matplotlib import cm
 from monai.data import DataLoader, ITKReader, PILReader
 
 from src.datasets.common import BaseDataset
-from src.PersistentDataset import ImageLabelPersistentDataset
 from src.ITKReader2D import ITKReader2D
+from src.PersistentDataset import ImageLabelPersistentDataset
 from src.utils import meta_safe_collate
 from src.volumetricPNGReader import VolumetricPNGReader
 
