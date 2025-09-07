@@ -7,7 +7,7 @@ from matplotlib import cm
 from monai.data import DataLoader, ITKReader, PILReader
 
 from src.datasets.common import BaseDataset
-from src.ImageDataset import ImageDataset
+from src.PersistentDataset import ImageLabelPersistentDataset
 from src.ITKReader2D import ITKReader2D
 from src.utils import meta_safe_collate
 from src.volumetricPNGReader import VolumetricPNGReader
@@ -26,7 +26,7 @@ chaos_labels_ct = [
 ]
 
 
-class PyTorchCHAOS(ImageDataset):
+class PyTorchCHAOS(ImageLabelPersistentDataset):
     """
     CHAOS Dataset for CT and MRI volumes using MONAI's ImageDataset.
 
@@ -82,7 +82,7 @@ class PyTorchCHAOS(ImageDataset):
             image_files = [image_files[i] for i in self.indices]
             seg_files = [seg_files[i] for i in self.indices]
 
-        # Initialize ImageDataset with file lists
+        # Initialize PersistentDataset-backed dataset with file lists
         super().__init__(
             image_files=image_files,
             seg_files=seg_files,
@@ -207,8 +207,6 @@ class CHAOS(BaseDataset):
             transform=transform,
             seg_transform=seg_transform,
             liver_only=liver_only,
-            cache_max_items=cache_max_items,
-            enable_cache=enable_cache,
         )
 
         # Get total number of samples
@@ -239,8 +237,6 @@ class CHAOS(BaseDataset):
             transform=transform,
             seg_transform=seg_transform,
             liver_only=liver_only,
-            cache_max_items=cache_max_items,
-            enable_cache=enable_cache,
         )
 
         self.val_dataset = PyTorchCHAOS(
@@ -251,8 +247,6 @@ class CHAOS(BaseDataset):
             transform=transform,
             seg_transform=seg_transform,
             liver_only=liver_only,
-            cache_max_items=cache_max_items,
-            enable_cache=enable_cache,
         )
 
         self.test_dataset = PyTorchCHAOS(
@@ -263,8 +257,6 @@ class CHAOS(BaseDataset):
             transform=transform,
             seg_transform=seg_transform,
             liver_only=liver_only,
-            cache_max_items=cache_max_items,
-            enable_cache=enable_cache,
         )
 
         # Create DataLoaders

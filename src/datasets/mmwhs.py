@@ -7,7 +7,7 @@ from matplotlib import cm
 from monai.data import DataLoader, NibabelReader
 
 from src.datasets.common import BaseDataset
-from src.ImageDataset import ImageDataset
+from src.PersistentDataset import ImageLabelPersistentDataset
 from src.utils import meta_safe_collate
 
 mmwhs_labels = {
@@ -22,7 +22,7 @@ mmwhs_labels = {
 }
 
 
-class PyTorchMMWHS(ImageDataset):
+class PyTorchMMWHS(ImageLabelPersistentDataset):
     """
     MM-WHS Dataset for CT and MRI volumes using MONAI's ImageDataset.
 
@@ -81,13 +81,14 @@ class PyTorchMMWHS(ImageDataset):
             image_files = [image_files[i] for i in self.indices]
             seg_files = [seg_files[i] for i in self.indices]
 
-        # Initialize ImageDataset with file lists
+        # Initialize PersistentDataset-backed dataset with file lists
         super().__init__(
             image_files=image_files,
             seg_files=seg_files,
             transform=transform,
-            reader=NibabelReader(),
             seg_transform=seg_transform,
+            reader=NibabelReader(),
+            seg_reader=NibabelReader(),
             **image_dataset_kwargs,
         )
 
@@ -189,9 +190,6 @@ class MMWHS(BaseDataset):
             transform=transform,
             seg_transform=seg_transform,
             slice_2d=slice_2d,
-            # pass cache knobs to ImageDataset
-            cache_max_items=cache_max_items,
-            enable_cache=enable_cache,
         )
 
         # Get total number of samples
@@ -221,8 +219,6 @@ class MMWHS(BaseDataset):
             transform=transform,
             seg_transform=seg_transform,
             slice_2d=slice_2d,
-            cache_max_items=cache_max_items,
-            enable_cache=enable_cache,
         )
 
         self.val_dataset = PyTorchMMWHS(
@@ -232,8 +228,6 @@ class MMWHS(BaseDataset):
             transform=transform,
             seg_transform=seg_transform,
             slice_2d=slice_2d,
-            cache_max_items=cache_max_items,
-            enable_cache=enable_cache,
         )
 
         self.test_dataset = PyTorchMMWHS(
@@ -243,8 +237,6 @@ class MMWHS(BaseDataset):
             transform=transform,
             seg_transform=seg_transform,
             slice_2d=slice_2d,
-            cache_max_items=cache_max_items,
-            enable_cache=enable_cache,
         )
 
         # Create DataLoaders
