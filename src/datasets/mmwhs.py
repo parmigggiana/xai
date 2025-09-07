@@ -260,7 +260,7 @@ class MMWHS(BaseDataset):
             train_loader_kwargs.update(
                 {
                     "persistent_workers": True,
-                    "prefetch_factor": 4,
+                    "prefetch_factor": 2,
                 }
             )
         self.train_loader = DataLoader(self.train_dataset, **train_loader_kwargs)
@@ -276,12 +276,11 @@ class MMWHS(BaseDataset):
             val_loader_kwargs.update(
                 {
                     "persistent_workers": True,
-                    "prefetch_factor": 4,
+                    "prefetch_factor": 2,
                 }
             )
         self.val_loader = DataLoader(self.val_dataset, **val_loader_kwargs)
 
-        # For compatibility, create test_loader
         test_loader_kwargs = {
             "shuffle": False,
             "batch_size": batch_size,
@@ -293,7 +292,7 @@ class MMWHS(BaseDataset):
             test_loader_kwargs.update(
                 {
                     "persistent_workers": True,
-                    "prefetch_factor": 4,
+                    "prefetch_factor": 2,
                 }
             )
         self.test_loader = DataLoader(self.test_dataset, **test_loader_kwargs)
