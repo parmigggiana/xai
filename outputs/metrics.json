@@ -1,0 +1,58 @@
+{
+    "CHAOS_CT_2d_finetuned": {
+        "train": {
+            "dice": 0.9764024190504437,
+            "hausdorff": null
+        },
+        "val": {
+            "dice": 0.9682788694799962,
+            "hausdorff": null
+        },
+        "test": {
+            "dice": 0.9689946199268396,
+            "hausdorff": null
+        }
+    },
+    "CHAOS_MR_2d_finetuned": {
+        "train": {
+            "dice": 0.9042345444513051,
+            "hausdorff": null
+        },
+        "val": {
+            "dice": 0.8337340874318474,
+            "hausdorff": null
+        },
+        "test": {
+            "dice": 0.8408232468140707,
+            "hausdorff": null
+        }
+    },
+    "MMWHS_CT_2d_finetuned": {
+        "train": {
+            "dice": 0.9661931596355452,
+            "hausdorff": null
+        },
+        "val": {
+            "dice": 0.9587428538969834,
+            "hausdorff": null
+        },
+        "test": {
+            "dice": 0.958211259228636,
+            "hausdorff": null
+        }
+    },
+    "MMWHS_MR_2d_finetuned": {
+        "train": {
+            "dice": 0.9271477790639642,
+            "hausdorff": null
+        },
+        "val": {
+            "dice": 0.8982059044328209,
+            "hausdorff": null
+        },
+        "test": {
+            "dice": 0.9017868272462063,
+            "hausdorff": null
+        }
+    }
+}
