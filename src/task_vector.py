@@ -56,6 +56,28 @@ class TaskVector:
             return self
         return self.__add__(other)
 
+    def __mul__(self, scalar):
+        """Scale a task vector by a scalar (float or int)."""
+        if not isinstance(scalar, (int, float)):
+            return NotImplemented
+        with torch.no_grad():
+            new_vector = {k: v * scalar for k, v in self.vector.items()}
+        return TaskVector(vector=new_vector)
+
+    def __rmul__(self, scalar):
+        """Right-hand scalar multiplication to support scalar * TaskVector."""
+        return self.__mul__(scalar)
+
+    def __truediv__(self, scalar):
+        """Divide a task vector by a scalar (float or int)."""
+        if not isinstance(scalar, (int, float)):
+            return NotImplemented
+        if scalar == 0:
+            raise ZeroDivisionError("division by zero")
+        with torch.no_grad():
+            new_vector = {k: v / scalar for k, v in self.vector.items()}
+        return TaskVector(vector=new_vector)
+
     def __neg__(self):
         """Negate a task vector."""
         with torch.no_grad():
