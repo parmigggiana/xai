@@ -1160,7 +1160,7 @@ class MedicalSegmenter(nn.Module):
         # Evaluation performance knobs (opt-in)
         max_batches_per_split: Optional[int] = None,
         fast_metrics: bool = True,
-        compute_hausdorff: bool = False,
+        compute_hausdorff: bool = True,
     ):
         """
         Evaluate the model and return metrics on both train and test loaders.
@@ -1300,6 +1300,24 @@ class MedicalSegmenter(nn.Module):
                                 fast_accum["fn"] += fn
                         except Exception:
                             pass
+
+                        # Even with fast_metrics, optionally accumulate Hausdorff metric
+                        if compute_hausdorff and hausdorff_metric is not None:
+                            try:
+                                def _to_onehot(x: torch.Tensor, num_classes: int) -> torch.Tensor:
+                                    x = x.squeeze(1).long()
+                                    oh = (
+                                        F.one_hot(x, num_classes=num_classes)
+                                        .movedim(-1, 1)
+                                        .float()
+                                    )
+                                    return oh
+
+                                preds_oh = _to_onehot(preds, self.num_classes)
+                                labels_oh = _to_onehot(labels, self.num_classes)
+                                hausdorff_metric(y_pred=preds_oh, y=labels_oh)
+                            except Exception:
+                                pass
                     else:
 
                         def _to_onehot(
@@ -1346,7 +1364,21 @@ class MedicalSegmenter(nn.Module):
                             )
                         else:
                             dice_score = 0.0
+                        # Aggregate Hausdorff if it was accumulated
                         hausdorff_dist = None
+                        if compute_hausdorff and hausdorff_metric is not None:
+                            try:
+                                hd_vals = hausdorff_metric.aggregate()
+                                if hasattr(hd_vals, "numel"):
+                                    mask = torch.isfinite(hd_vals)
+                                    if mask.any():
+                                        hausdorff_dist = hd_vals[mask].mean().item()
+                                    else:
+                                        hausdorff_dist = float("nan")
+                                else:
+                                    hausdorff_dist = float(hd_vals)
+                            except Exception:
+                                pass
                     else:
                         dice_score = dice_metric.aggregate().item()
                         hausdorff_dist = None
