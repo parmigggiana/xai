@@ -3,6 +3,7 @@ Adapted from https://github.com/mlfoundations/task_vectors/ by Ilalrco et al.
 """
 
 import torch
+from numbers import Number
 
 
 class TaskVector:
@@ -58,10 +59,18 @@ class TaskVector:
 
     def __mul__(self, scalar):
         """Scale a task vector by a scalar (float or int)."""
-        if not isinstance(scalar, (int, float)):
+        if not isinstance(scalar, Number):
             return NotImplemented
         with torch.no_grad():
-            new_vector = {k: v * scalar for k, v in self.vector.items()}
+            new_vector = {}
+            for k, v in self.vector.items():
+                try:
+                    # Match dtype/device of the parameter delta to avoid promotion/move issues later
+                    s = torch.as_tensor(scalar, dtype=v.dtype, device=v.device)
+                    new_vector[k] = v * s
+                except Exception:
+                    # Fallback to plain Python scaling if tensor casting fails
+                    new_vector[k] = v * scalar
         return TaskVector(vector=new_vector)
 
     def __rmul__(self, scalar):
@@ -70,12 +79,18 @@ class TaskVector:
 
     def __truediv__(self, scalar):
         """Divide a task vector by a scalar (float or int)."""
-        if not isinstance(scalar, (int, float)):
+        if not isinstance(scalar, Number):
             return NotImplemented
         if scalar == 0:
             raise ZeroDivisionError("division by zero")
         with torch.no_grad():
-            new_vector = {k: v / scalar for k, v in self.vector.items()}
+            new_vector = {}
+            for k, v in self.vector.items():
+                try:
+                    s = torch.as_tensor(scalar, dtype=v.dtype, device=v.device)
+                    new_vector[k] = v / s
+                except Exception:
+                    new_vector[k] = v / scalar
         return TaskVector(vector=new_vector)
 
     def __neg__(self):
