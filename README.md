@@ -1,72 +1,85 @@
-# MONAI Volumetric Segmentation Project
+# XAI Medical Segmentation (Swin UNETR + CLIPSeg)
 
-This project provides a skeleton for volumetric segmentation tasks using the MONAI framework. It includes:
+Multi-modal medical image segmentation framework, with dataset-aware prompt engineering, efficient data pipelines (2D slice or 3D volume), persistent caching, mixed-precision finetuning, and task-vector model editing for adaptation analysis. The main interactive workflow lives in `local.ipynb`.
 
-- An interface function to evaluate a segmentation model on 3D medical images.
-- Default support for pretrained Swin-UNETR.
-- Standard evaluation metrics (Dice and Hausdorff Distance).
-- Dataset loaders for CHAOS, MM-WHS, and APIS medical imaging datasets.
-- Visualization utilities for 3D medical data.
+## TL;DR
+Train or adapt Swin-UNETR / CLIPSeg on CHAOS (CT/MR) or MMWHS datasets, generate metrics (Dice / Hausdorff), visualize predictions, blend model deltas via task vectors, and aggregate experiment JSON logs to CSV for analysis.
 
-## Features
+---
+## Core Notebook: `local.ipynb`
+The notebook orchestrates:
+1. Environment & imports
+2. Dataset selection (CHAOS / MMWHS, domain & 2D vs 3D mode)
+3. Model construction (`MedicalSegmenter` with `encoder_type="swin_unetr" | "clipseg"`)
+4. (Optional) Loading pretrained or finetuned checkpoint
+5. Finetuning loop (warmup + cosine LR, mixed precision)
+6. Validation metrics logging to JSON in `outputs/`
+7. Visualization of sample slices / volumes and overlays
+8. (Optional) Task vector creation and arithmetic between baseline / finetuned checkpoints
 
-✅ **Fixed dimension mismatch errors** - Properly handles 2D/3D model compatibility  
-✅ **MONAI-based segmentation** - Uses state-of-the-art Swin-UNETR architecture 
-✅ **Dataset-specific classification heads** - Automatically saves/loads heads per dataset  
-✅ **Standard medical imaging metrics** - Dice coefficient and Hausdorff distance  
-✅ **Multiple dataset support** - CHAOS, MM-WHS, APIS with proper data loaders  
-✅ **Visualization tools** - View volumetric slices and segmentation overlays  
+You can re-run cells selectively to compare adaptation strategies (e.g., different alpha scaling for task vectors) and then consolidate results via `outputs/make_csv.py`.
 
-## Usage
-
-1. Install dependencies:
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-2. Run the example:
-
-   ```python
-   python example_usage.py
-   ```
-
-3. Use the interface function:
-
-   ```python
-   from monai_project.interface import evaluate_segmentation_performance
-   
-   metrics = evaluate_segmentation_performance(
-       dataset_name="MyDataset",
-       dataloader=my_dataloader,
-       save_path="./checkpoints"
-   )
-   print(metrics)
-   ```
-
-## Project Structure
-
-- `monai_project/` - Core MONAI interface and utilities
-- `src/datasets/` - Dataset loaders for medical imaging datasets
-- `src/head.py` - Segmentation head building and management
-- `src/modelseg.py` - Segmentation model wrapper with dimension handling
-- `notebooks/` - Jupyter notebooks for dataset visualization
-- `example_usage.py` - Complete working example
-
+---
 ## Datasets
 
-The project supports the following medical imaging datasets:
+### CHAOS
+Supports CT and MR. MRI optionally filtered to liver-only. Loader scans both train & test sets, retaining only samples with existing masks; splits into train/val/test with user-set ratios (default 70/15/15).
 
-- **CHAOS** - CT and MRI liver segmentation
-- **MM-WHS** - Multi-modal whole heart segmentation  
-- **APIS** - Additional medical imaging dataset
+Labels (MR full): Background, Liver, Right kidney, Left kidney, Spleen.  
+Labels (CT): Background, Liver.
 
-Place datasets in the `data/` directory following the expected structure.
+### MMWHS (Multi-Modality Whole Heart Segmentation)
+Maps multi-class anatomical structures to contiguous class indices (see `mmwhs.py`).
 
+### 2D vs 3D
+Set `slice_2d=True` to convert volumetric DICOM stacks into individual slices, or `False` for full 3D volumes with Swin-UNETR.
+
+---
+## Installation
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+Ensure a CUDA-enabled PyTorch build is installed (adjust `torch` install if needed).
+
+---
+## Visualization
+Use `visualize_sample_predictions.py` or notebook cells to overlay predictions:
+```bash
+python visualize_sample_predictions.py --checkpoint checkpoints/CHAOS_CT_2d_finetuned.pth --dataset CHAOS --domain CT
+```
+Figures stored in `outputs/figures/` (e.g., `adaptation_4panel.png`).
+
+---
+## Caching & Performance Tips
+* Adjust `num_workers` based on I/O.
+
+
+---
 ## References
-
 MM-WHS:
-[1] Xiahai Zhuang: Multivariate mixture model for myocardial segmentation combining multi-source images. IEEE Transactions on Pattern Analysis and Machine Intelligence 41(12): 2933-2946, 2019. [link](https://ieeexplore.ieee.org/document/8458220/) [code](https://github.com/xzluo97/MvMM-Demo)  
-[2] X Zhuang & J Shen: Multi-scale patch and multi-modality atlases for whole heart segmentation of MRI, Medical Image Analysis 31: 77-87, 2016 ([link](http://dx.doi.org/10.1016/j.media.2016.02.006))  
-[3] F Wu & X Zhuang. Minimizing Estimated Risks on Unlabeled Data: A New Formulation for Semi-Supervised Medical Image Segmentation. IEEE Transactions on Pattern Analysis and Machine Intelligence (T PAMI) 45(5): 6021 - 6036, 2023 [link](https://ieeexplore.ieee.org/document/9921323) [code](https://github.com/FupingWu90/MERU)  
-[4] S Gao, H Zhou, Y Gao, X Zhuang. BayeSeg: Bayesian Modeling for Medical Image Segmentation with Interpretable Generalizability. Medical Image Analysis 89, 102889, 2023 [code&tutorial](https://github.com/obiyoag/BayeSeg), [link](https://www.sciencedirect.com/journal/medical-image-analysis/special-issue/10MFST0CK73) (Elsevier-MedIA 1st Prize & Best Paper Award of MICCAl society 2023)
+1. X. Zhuang. Multivariate mixture model for myocardial segmentation combining multi-source images. TPAMI 41(12):2933–2946, 2019.  
+2. X. Zhuang & J. Shen. Multi-scale patch and multi-modality atlases for whole heart segmentation of MRI. MedIA 31:77–87, 2016.  
+3. F. Wu & X. Zhuang. Minimizing Estimated Risks on Unlabeled Data... TPAMI 45(5):6021–6036, 2023.  
+4. S. Gao et al. BayeSeg: Bayesian Modeling for Medical Image Segmentation. MedIA 89:102889, 2023.  
+
+Swin-UNETR & MONAI:
+* Hatamizadeh et al., Swin UNETR: Transformers for 3D medical image segmentation (arXiv:2201.01266)
+
+CLIP / CLIPSeg:
+* Radford et al. Learning Transferable Visual Models From Natural Language Supervision (ICML 2021)
+* Lüddecke & Ecker. Image Segmentation Using Text and Image Prompts (CVPR 2022 – CLIPSeg)
+
+Task Vectors:
+* Ilharco et al. Editing Models with Task Arithmetic (ICLR 2023)
+
+---
+## License & Acknowledgments
+This project builds upon MONAI, CLIPSeg and published medical imaging datasets. Ensure you have permission & proper dataset licensing before use. All third-party assets retain their original licenses.
+
+---
+## Contact
+For questions or improvements, open an issue or submit a PR.
