@@ -200,3 +200,4 @@ data
 
 *.pt
 *.pth
+outputs/*
