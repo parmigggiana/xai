@@ -1103,10 +1103,19 @@ class MedicalSegmenter(nn.Module):
 
         This mirrors the upstream task_vectors API where scaling is applied at application time.
         """
+        tv_keys = set(task_vector.keys())
+        print(f"TV keys: {list(tv_keys)[:5]}... ({len(tv_keys)} total)")
+
         with torch.no_grad():
             for name, param in self.encoder.named_parameters():
-                if name in task_vector.vector:
-                    param.data += scaling_coef * task_vector.vector[name]
+                if name in task_vector.keys():
+                    tv_keys.remove(name)
+                    param.data += scaling_coef * task_vector[name]
+        if tv_keys:
+            print(
+                f"Warning: {len(tv_keys)} task vector keys were not found in the encoder: {tv_keys}"
+            )
+        print("Task vector applied.")
 
     def _visualize_batch(self, images, preds, labels, title: str = "batch"):
         """Display images, predictions and labels for the first item in the batch.
@@ -1304,7 +1313,10 @@ class MedicalSegmenter(nn.Module):
                         # Even with fast_metrics, optionally accumulate Hausdorff metric
                         if compute_hausdorff and hausdorff_metric is not None:
                             try:
-                                def _to_onehot(x: torch.Tensor, num_classes: int) -> torch.Tensor:
+
+                                def _to_onehot(
+                                    x: torch.Tensor, num_classes: int
+                                ) -> torch.Tensor:
                                     x = x.squeeze(1).long()
                                     oh = (
                                         F.one_hot(x, num_classes=num_classes)

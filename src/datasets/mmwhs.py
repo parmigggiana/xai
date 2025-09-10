@@ -249,7 +249,7 @@ class MMWHS(BaseDataset):
             "num_workers": num_workers,
             "pin_memory": True if torch.cuda.is_available() else False,
             "drop_last": True,
-            "collate_fn": meta_safe_collate,
+            "collate_fn": meta_safe_collate if slice_2d else None,
         }
         if num_workers and num_workers > 0:
             train_loader_kwargs.update(
@@ -265,7 +265,7 @@ class MMWHS(BaseDataset):
             "batch_size": batch_size,
             "num_workers": num_workers,
             "pin_memory": True if torch.cuda.is_available() else False,
-            "collate_fn": meta_safe_collate,
+            "collate_fn": meta_safe_collate if slice_2d else None,
         }
         if num_workers and num_workers > 0:
             val_loader_kwargs.update(
@@ -281,7 +281,7 @@ class MMWHS(BaseDataset):
             "batch_size": batch_size,
             "num_workers": num_workers,
             "pin_memory": True if torch.cuda.is_available() else False,
-            "collate_fn": meta_safe_collate,
+            "collate_fn": meta_safe_collate if slice_2d else None,
         }
         if num_workers and num_workers > 0:
             test_loader_kwargs.update(
