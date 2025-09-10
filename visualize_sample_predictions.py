@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 import random
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List
 
 import matplotlib.pyplot as plt
 import torch
@@ -266,16 +266,14 @@ def build_all_task_vectors() -> (
 def pick_one_sample(dataset: BaseDataset) -> Tuple[torch.Tensor, torch.Tensor]:
     """Pick a random (image, label) pair from available loaders.
 
-    Prefers val, then train, then test. Randomly selects both the batch and the index within the batch
-    when possible (i.e., when loader has a defined length). Falls back to the first yielded batch otherwise.
+    Prefers val, then train, then test. Random selection of batch and index if possible.
     """
     loader = dataset.val_loader or dataset.train_loader or dataset.test_loader
     if loader is None:
         raise RuntimeError("No dataloaders available in dataset")
 
-    # Try to pick a random batch if len(loader) is available
     try:
-        num_batches = len(loader)  # may raise TypeError if undefined
+        num_batches = len(loader)
     except Exception:
         num_batches = None
 
@@ -285,7 +283,6 @@ def pick_one_sample(dataset: BaseDataset) -> Tuple[torch.Tensor, torch.Tensor]:
             if i == target_batch:
                 break
     else:
-        # Fallback: just take the first batch
         batch = next(iter(loader))
 
     img = batch.get("image")
@@ -293,14 +290,45 @@ def pick_one_sample(dataset: BaseDataset) -> Tuple[torch.Tensor, torch.Tensor]:
     if img is None or lab is None:
         raise RuntimeError("Batch missing 'image' or 'label'")
 
-    # Random index within the batch
     bsz = getattr(img, "shape", None)[0] if hasattr(img, "shape") else None
-    if not isinstance(bsz, int) or bsz <= 0:
-        idx = 0
-    else:
-        idx = random.randrange(bsz)
-
+    idx = random.randrange(bsz) if isinstance(bsz, int) and bsz > 0 else 0
     return img[idx], lab[idx]
+
+
+def pick_rich_sample(
+    dataset: BaseDataset, min_foreground_classes: int = 2
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Pick a sample whose ground-truth mask contains at least ``min_foreground_classes`` distinct non-zero classes.
+
+    Falls back to a random sample if none found.
+    """
+    loader = dataset.val_loader or dataset.train_loader or dataset.test_loader
+    if loader is None:
+        raise RuntimeError("No dataloaders available in dataset")
+
+    chosen: Tuple[torch.Tensor, torch.Tensor] | None = None
+    try:
+        for batch in loader:
+            img = batch.get("image")
+            lab = batch.get("label")
+            if img is None or lab is None:
+                continue
+            bsz = img.shape[0]
+            for i in range(bsz):
+                label_tensor = lab[i]
+                uniq = torch.unique(label_tensor)
+                fg = [u for u in uniq.tolist() if u != 0]
+                if len(set(fg)) >= min_foreground_classes:
+                    return img[i], label_tensor
+            # keep one fallback if nothing matches
+            if chosen is None:
+                chosen = (img[0], lab[0])
+    except Exception:
+        pass
+    if chosen is not None:
+        return chosen
+    # ultimate fallback
+    return pick_one_sample(dataset)
 
 
 def to_numpy(x: torch.Tensor):
@@ -311,74 +339,85 @@ def to_numpy(x: torch.Tensor):
     return x.numpy()
 
 
-def visualize_triptych(
-    image,
-    label,
-    preds_by_model: Dict[str, torch.Tensor],
-    title: str,
+def visualize_all_samples(
+    rows: List[Dict],
+    variant_order: List[str],
     out_dir: Path,
-    filename: str | None = None,
+    filename: str = "all_sample_predictions.png",
 ):
-    """Create composite figure (image, GT, predictions) and save to file.
+    """Visualize all dataset/domain samples in a single multi-row figure.
 
-    Args:
-        image: input image tensor
-        label: ground-truth label tensor
-        preds_by_model: mapping variant name -> prediction tensor
-        title: figure title
-        out_dir: directory to save image
-        filename: override filename (without path). If None, derived from title.
+    Each row: image | GT | predictions for each variant in variant_order (if present).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    ncols = 2 + len(preds_by_model)
-    fig, axes = plt.subplots(1, ncols, figsize=(4 * ncols, 4))
+    ncols = 2 + len(variant_order)
+    nrows = len(rows)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(2.7 * ncols, 2.5 * nrows))
+    if nrows == 1:
+        axes = axes.reshape(1, -1)
 
-    img_np = to_numpy(image)
-    if img_np.ndim == 3 and img_np.shape[0] in (1, 3):
-        img_np = img_np[0]
+    for r, row in enumerate(rows):
+        image = row["image"]
+        label = row["label"]
+        preds = row["preds"]
+        title = row["title"]  # format: Dataset / Domain
+        # build row label like "CHAOS CT"
+        if "/" in title:
+            parts = [p.strip() for p in title.split("/")]
+            row_label = " ".join(parts)
+        else:
+            row_label = title
 
-    axes[0].imshow(img_np, cmap="gray")
-    axes[0].set_title("image")
-    axes[0].axis("off")
+        img_ax = axes[r][0]
+        img_np = to_numpy(image)
+        if img_np.ndim == 3 and img_np.shape[0] in (1, 3):
+            img_np = img_np[0]
+        img_ax.imshow(img_np, cmap="gray")
+        if r == 0:
+            img_ax.set_title("Image")
+        # Keep axis so ylabel shows; just hide ticks and spines
+        img_ax.set_xticks([])
+        img_ax.set_yticks([])
+        for spine in img_ax.spines.values():
+            spine.set_visible(False)
 
-    lab_np = to_numpy(label.squeeze(0))
-    axes[1].imshow(lab_np, cmap="viridis")
-    axes[1].set_title("ground truth")
-    axes[1].axis("off")
+        gt_ax = axes[r][1]
+        lab_np = to_numpy(label.squeeze(0))
+        gt_ax.imshow(lab_np, cmap="viridis")
+        if r == 0:
+            gt_ax.set_title("Ground Truth")
+        gt_ax.axis("off")
 
-    col = 2
-    for name, pred in preds_by_model.items():
-        p_np = to_numpy(pred.squeeze(0))
-        axes[col].imshow(p_np, cmap="viridis")
-        axes[col].set_title(name)
-        axes[col].axis("off")
-        col += 1
-
-    fig.suptitle(title)
-    fig.tight_layout()
-
-    # Derive filename
-    if filename is None:
-        safe = (
-            title.lower()
-            .replace("/", "_")
-            .replace(" ", "_")
-            .replace("—", "-")
-            .replace("--", "-")
+        for c, vn in enumerate(variant_order):
+            ax = axes[r][2 + c]
+            if vn in preds:
+                p_np = to_numpy(preds[vn].squeeze(0))
+                ax.imshow(p_np, cmap="viridis")
+            if r == 0:
+                ax.set_title(vn if vn in preds else vn)
+            ax.axis("off")
+        # Add row label on the far left using ylabel of first column (horizontal for readability)
+        axes[r][0].set_ylabel(
+            row_label, rotation=0, fontsize=11, labelpad=25, ha="right", va="center"
         )
-        filename = f"{safe}.png"
+
+    # Adjust layout to leave room for left labels
+    fig.tight_layout()
     save_path = out_dir / filename
-    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    fig.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print(f"Saved: {save_path}")
+    print(f"Saved combined figure: {save_path}")
 
 
 def run(args: argparse.Namespace):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     encoder_type = "swin_unetr" if args.use_3d else "clipseg"
 
-    # Build task vectors once (if checkpoints are available)
+    # Build task vectors once
     _, comp_by_dataset, comp_by_domain = build_all_task_vectors()
+
+    rows: List[Dict] = []
+    all_variant_names: set[str] = set()
 
     for dataset_name in args.datasets:
         for domain in args.domains:
@@ -386,7 +425,6 @@ def run(args: argparse.Namespace):
             image_transform, seg_transform = get_preprocessing(
                 dataset_name, domain, is_training=False
             )
-
             ds: BaseDataset = get_dataset(
                 dataset_name=dataset_name,
                 base_path=DATA_PATH,
@@ -398,8 +436,12 @@ def run(args: argparse.Namespace):
                 slice_2d=not USE_3D,
             )
 
-            # pick a single sample (image, label) and move to device
-            image, label = pick_one_sample(ds)
+            # Sample selection: enforce richer mask for MMWHS CT
+            if dataset_name == "MMWHS":
+                image, label = pick_rich_sample(ds, min_foreground_classes=2)
+            else:
+                image, label = pick_one_sample(ds)
+
             if hasattr(image, "as_tensor"):
                 image = image.as_tensor()
             if hasattr(label, "as_tensor"):
@@ -407,7 +449,6 @@ def run(args: argparse.Namespace):
             image = image.to(device)
             label = label.to(device)
 
-            # collect predictions from registered variants
             preds_by_model: Dict[str, torch.Tensor] = {}
             for variant_name, builder in MODEL_VARIANTS.items():
                 try:
@@ -420,8 +461,7 @@ def run(args: argparse.Namespace):
                 except FileNotFoundError as e:
                     print(f"  Skipping {variant_name}: {e}")
 
-            # Additional variants from Part 1 composite task vectors
-            # 1) dataset composite: {dataset}: TV(dataset_MR) + TV(dataset_CT)
+            # dataset composite
             comp_ds = comp_by_dataset.get(dataset_name)
             if comp_ds is not None:
                 base_ckpt = _checkpoint_for(dataset_name, domain, "baseline")
@@ -439,7 +479,7 @@ def run(args: argparse.Namespace):
                     except Exception as e:
                         print(f"  Skipping tv_{dataset_name}: {e}")
 
-            # 2) domain composite: {domain}: TV(CHAOS_domain) + TV(MMWHS_domain)
+            # domain composite
             comp_dom = comp_by_domain.get(domain)
             if comp_dom is not None:
                 base_ckpt = _checkpoint_for(dataset_name, domain, "baseline")
@@ -457,17 +497,41 @@ def run(args: argparse.Namespace):
                     except Exception as e:
                         print(f"  Skipping tv_{domain}: {e}")
 
-            title = f"{dataset_name} / {domain} — {encoder_type}"
-            # Build deterministic filename: dataset_domain_encoder.png
-            file_stub = f"{dataset_name}_{domain}_{encoder_type}".lower()
-            visualize_triptych(
-                image,
-                label,
-                preds_by_model,
-                title,
-                out_dir=args.out_dir,
-                filename=f"{file_stub}.png",
+            # Rename composite variants per user request
+            renamed: Dict[str, torch.Tensor] = {}
+            for k, v in preds_by_model.items():
+                if k in ("tv_CHAOS", "tv_MMWHS"):
+                    renamed["Body Part Composition"] = v
+                elif k in ("tv_CT", "tv_MR"):
+                    renamed["Imaging Tech Composition"] = v
+                else:
+                    renamed[k] = v
+            preds_by_model = renamed
+            all_variant_names.update(preds_by_model.keys())
+
+            rows.append(
+                {
+                    "image": image,
+                    "label": label,
+                    "preds": preds_by_model,
+                    "title": f"{dataset_name} / {domain}",
+                }
             )
+
+    # Consistent variant ordering
+    preferred = [
+        "baseline",
+        "finetuned",
+        "Body Part Composition",
+        "Imaging Tech Composition",
+    ]
+    variant_order = [p for p in preferred if p in all_variant_names]
+    # add any remaining (unlikely) extra variants
+    variant_order.extend(
+        [v for v in sorted(all_variant_names) if v not in variant_order]
+    )
+
+    visualize_all_samples(rows, variant_order, args.out_dir)
 
 
 def parse_args() -> argparse.Namespace:

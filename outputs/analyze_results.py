@@ -680,7 +680,7 @@ def plot_bar_alpha(df: pd.DataFrame, target_alpha: float = 0.8):
         categories=[pretty_map[m] for m in order_models],
         ordered=True,
     )
-    plt.figure(figsize=(8, 5))
+    plt.figure(figsize=(9, 5))
     sns.barplot(data=plot_df, x="dataset", y="dice", hue="model_pretty")
     # plt.title(f'Confronto modelli (alpha={target_alpha})')
     plt.ylabel("Dice (test)")
@@ -690,10 +690,10 @@ def plot_bar_alpha(df: pd.DataFrame, target_alpha: float = 0.8):
         title="Model", loc="center left", bbox_to_anchor=(0, 0.4), borderaxespad=0
     )
     for txt in leg.get_texts():
-        txt.set_fontsize(9)
+        txt.set_fontsize(11)
     plt.tight_layout()
     out_path = os.path.join(OUTPUT_DIR, "bar_overall.png")
-    plt.savefig(out_path, dpi=150)
+    plt.savefig(out_path, dpi=200)
     plt.close()
     print(f"Salvato: {out_path}")
 
@@ -745,8 +745,9 @@ def plot_adaptation_mean_vs_alpha():
 
 
 def plot_adaptation_4panel():
-    """4 subplot figure for adaptation models:
-    Each dataset in one subplot, two curves (wb=False, wb=True) + baseline line.
+    """4 subplot figure (2x2 grid) for adaptation models.
+
+    Each dataset-domain combination gets one subplot with bars for wb True/False per alpha and a dashed baseline line.
     """
     raw = pd.read_csv(RESULTS_CSV)
     adp = raw[
@@ -771,10 +772,11 @@ def plot_adaptation_4panel():
         m.replace("_2d_baseline", ""): baselines[baselines["model"] == m]["dice"].mean()
         for m in baselines["model"].unique()
     }
-    fig, axes = plt.subplots(1, 4, figsize=(16, 8), sharey=True)
+    fig, axes = plt.subplots(2, 2, figsize=(9, 7), sharey=True)
+    axes_flat = axes.flatten()
     colors = {False: "#1f77b4", True: "#d62728"}
-    for col, ds in enumerate(datasets):
-        ax = axes[col]
+    for idx, ds in enumerate(datasets):
+        ax = axes_flat[idx]
         for wb_flag in [False, True]:
             subset = adp[
                 (adp["model"] == f"{ds}_adaptation") & (adp["wb_flag"] == wb_flag)
@@ -800,13 +802,13 @@ def plot_adaptation_4panel():
         if pd.notna(bval):
             ax.axhline(bval, color="#ff7f0e", linestyle="--", label="baseline")
         ax.set_title(ds)
-        if col == 0:
+        if idx % 2 == 0:
             ax.set_ylabel("Dice (test)")
         else:
             ax.set_ylabel("")
         ax.set_xlabel("Alpha")
     handles, labels = [], []
-    for ax in axes:
+    for ax in axes_flat:
         leg = ax.get_legend()
         if leg:
             h, lbls = leg.legend_handles, [t.get_text() for t in leg.texts]
@@ -822,9 +824,9 @@ def plot_adaptation_4panel():
         ncol=len(labels),
         bbox_to_anchor=(0.5, -0.02),
     )
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0.04, 1, 1))
     out_path = os.path.join(OUTPUT_DIR, "adaptation_4panel.png")
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     print(f"Salvato: {out_path}")
 
