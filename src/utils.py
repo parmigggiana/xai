@@ -192,6 +192,7 @@ def _build_image_transforms(
     mean: Optional[float],
     std: Optional[float],
     is_training: bool,
+    batch_size,
 ):
     T = transforms_module
 
@@ -215,9 +216,9 @@ def _build_image_transforms(
         )
     )
 
-    if use_3d:
+    if use_3d and batch_size > 1:
         image_transforms.append(
-            T.SpatialPad(spatial_size=(-1, -1, spatial_size // 2), mode="constant")
+            T.SpatialPad(spatial_size=(-1, -1, spatial_size), mode="constant")
         )
 
     image_transforms.extend([T.ToTensor(), T.EnsureType(dtype=torch.float32)])
@@ -251,6 +252,7 @@ def _build_seg_transforms(
     use_3d: bool,
     spatial_size: int,
     decode_func,
+    batch_size,
 ):
     T = transforms_module
 
@@ -274,10 +276,10 @@ def _build_seg_transforms(
         ]
     )
 
-    if use_3d:
+    if use_3d and batch_size > 1:
         seg_transforms.append(
             T.SpatialPad(
-                spatial_size=(-1, -1, spatial_size // 2),
+                spatial_size=(-1, -1, spatial_size),
                 mode="constant",
                 constant_values=0,
             )
@@ -298,6 +300,7 @@ def get_preprocessing(
     debug: bool = False,
     memory_trace: bool = False,
     memory_snapshot_fn: Optional[Callable[[str], None]] = None,
+    batch_size: int,
 ):
     """Build MONAI transforms for images and segmentation masks.
 
@@ -318,6 +321,7 @@ def get_preprocessing(
         mean=mean,
         std=std,
         is_training=is_training,
+        batch_size=batch_size,
     )
     image_transforms = _wrap_transforms_for_memory_tracking(
         image_transforms,
@@ -333,6 +337,7 @@ def get_preprocessing(
         use_3d=use_3d,
         spatial_size=spatial_size,
         decode_func=decode_func,
+        batch_size=batch_size,
     )
     seg_transforms = _wrap_transforms_for_memory_tracking(
         seg_transforms,

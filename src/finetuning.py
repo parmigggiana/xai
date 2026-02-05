@@ -25,6 +25,10 @@ class FinetuneConfig:
     spatial_size: int = 128
     learning_rate: float = 1e-4
     weight_decay: float = 5e-5
+    # Finetuning controls (forwarded to MedicalSegmenter.finetune)
+    save_best: bool = True
+    early_stop_patience: int = 5
+    val_max_batches: Optional[int] = None
     num_workers: int = 0
     debug: bool = False
     memory_trace: bool = False
@@ -134,6 +138,7 @@ def _finetune_one(
         debug=config.debug,
         memory_trace=config.memory_trace,
         memory_snapshot_fn=memory_snapshot_fn,
+        batch_size=config.batch_size,
     )
 
     finetuned_checkpoint = _finetuned_checkpoint_path(
@@ -179,6 +184,9 @@ def _finetune_one(
         epochs=epochs,
         learning_rate=config.learning_rate,
         weight_decay=config.weight_decay,
+        save_best=config.save_best,
+        early_stop_patience=config.early_stop_patience,
+        val_max_batches=config.val_max_batches,
         debug=config.debug,
         profile=config.profile,
         profile_dir=str(profile_dir),
