@@ -200,4 +200,6 @@ data
 
 *.pt
 *.pth
+tests/outputs/
 outputs/*
+checkpoints/

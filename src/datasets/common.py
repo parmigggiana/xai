@@ -29,10 +29,10 @@ class BaseDataset:
             legend[label] = set1(idx % set1.N)
         return legend
 
-    def get_model(self, encoder_type="swin_unetr"):
+    def get_model(self, base_model="swin_unetr"):
         """
         Args:
-            encoder_type (str): Type of encoder to use ('swin_unetr', 'resnet', or 'clipseg')
+            base_model (str): Base model to use ('swin_unetr', 'resnet', or 'clipseg')
 
         Returns:
             MedicalSegmenter or CLIPSeg: Model with semantic guidance capabilities
@@ -40,7 +40,7 @@ class BaseDataset:
 
         # Original logic for other encoder types
         model = MedicalSegmenter(
-            encoder_type=encoder_type,
+            base_model=base_model,
             num_classes=self.num_classes,
             pretrained=True,
             dataset=self,

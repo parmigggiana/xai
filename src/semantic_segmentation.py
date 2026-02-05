@@ -26,7 +26,7 @@ class MedicalSegmenter(nn.Module):
 
     def __init__(
         self,
-        encoder_type: str,
+        base_model: str,
         num_classes: int,
         pretrained: bool = True,
         dataset=None,
@@ -34,7 +34,7 @@ class MedicalSegmenter(nn.Module):
         super().__init__()
 
         # Store model configuration
-        self.encoder_type = encoder_type
+        self.base_model = base_model
         self.num_classes = num_classes
         self.dataset = dataset
         self.pretrained = pretrained
@@ -43,7 +43,7 @@ class MedicalSegmenter(nn.Module):
         self._amp_dtype = None
 
         # Initialize encoder
-        if encoder_type == "swin_unetr":
+        if self.base_model == "swin_unetr":
             self.encoder = SwinUNETR(
                 in_channels=1,
                 out_channels=num_classes,
@@ -55,7 +55,7 @@ class MedicalSegmenter(nn.Module):
             if pretrained:
                 self._load_swinvit_weights()
 
-        elif encoder_type == "clipseg":
+        elif self.base_model == "clipseg":
             # Extract dataset information for medical template selection
             dataset_info = None
             if dataset is not None:
@@ -149,7 +149,7 @@ class MedicalSegmenter(nn.Module):
 
         else:
             raise ValueError(
-                f"Unknown encoder type: {encoder_type}. Supported: 'swin_unetr', 'clipseg'."
+                f"Unknown encoder type: {base_model}. Supported: 'swin_unetr', 'clipseg'."
             )
 
     def to(self, device):
@@ -163,6 +163,7 @@ class MedicalSegmenter(nn.Module):
 
     def _load_swinvit_weights(self):
         """Load pretrained SwinViT weights from data/model_swinvit.pt"""
+        print()
         try:
             resource = "https://github.com/Project-MONAI/MONAI-extra-test-data/releases/download/0.8.1/ssl_pretrained_weights.pth"
             dst = "./data/ssl_pretrained_weights.pth"
@@ -213,12 +214,9 @@ class MedicalSegmenter(nn.Module):
                     # print("Layer {}, the update difference is: {}".format(k, diff))
                     if abs(diff) < 1e-8:  # Use tolerance for floating point comparison
                         print("Warning: No difference found for layer {}".format(k))
-            print(
-                "Total updated layers {} / {}".format(
-                    layer_counter, len(model_prior_dict)
-                )
-            )
+
             print("Pretrained Weights Succesfully Loaded !")
+            print(f"Total updated layers {layer_counter} / {len(model_prior_dict)}")
 
         except Exception as e:
             print(f"Error loading SwinViT weights: {e}")
@@ -248,7 +246,7 @@ class MedicalSegmenter(nn.Module):
         self, result: torch.Tensor, original_shape: Tuple[int, int, int]
     ) -> torch.Tensor:
         """Crops the output tensor back to the original shape if it was padded."""
-        if self.encoder_type == "swin_unetr":
+        if self.base_model == "swin_unetr":
             depth, height, width = original_shape
             result = result[:, :, :depth, :height, :width]
         return result
@@ -271,12 +269,12 @@ class MedicalSegmenter(nn.Module):
 
         # Preprocess input: resample to 256x256
         # x, original_size = self._preprocess_input(x)
-        if self.encoder_type == "swin_unetr":
+        if self.base_model == "swin_unetr":
             x, original_shape = self._pad_input_for_swin_unetr(x)
 
         result = self.encoder(x)
 
-        if self.encoder_type == "swin_unetr":
+        if self.base_model == "swin_unetr":
             result = self._crop_output_to_original_size(result, original_shape)
 
         # Postprocess output: resample to original size
@@ -426,6 +424,7 @@ class MedicalSegmenter(nn.Module):
             except Exception as e:
                 print(f"[compile] disabled (fallback): {e}")
 
+        print()
         print(f"🚀 Starting training for {epochs} epochs")
         print(f"   Device: {device}")
         # Fixed 5-epoch warmup for stability
@@ -696,7 +695,7 @@ class MedicalSegmenter(nn.Module):
                         images = images.to(device, non_blocking=True)
                         labels = labels.to(device, non_blocking=True)
 
-                        if self.encoder_type == "swin_unetr" and labels.dim() == 4:
+                        if self.base_model == "swin_unetr" and labels.dim() == 4:
                             labels = labels.unsqueeze(1)
 
                         # Use mixed precision for validation forward for speed when CUDA is available
@@ -717,6 +716,17 @@ class MedicalSegmenter(nn.Module):
                         # Print or visualize debug info (limit verbose output)
                         if visualize_batches or debug:
                             try:
+                                print(f"\n--- Val Batch {batch_idx} Summary ---")
+                                print(f"Images shape: {images.shape}")
+                                if len(images.shape) == 4:
+                                    # 3D batch: visualize middle slice
+                                    mid_idx = images.shape[2] // 2
+                                    images = images[:, :, mid_idx, :, :]
+                                    preds = preds[:, :, mid_idx, :, :]
+                                    labels = labels[:, :, mid_idx, :, :]
+                                print(
+                                    f"After slicing (if 3D) - Images: {images.shape}, Preds: {preds.shape}, Labels: {labels.shape}"
+                                )
                                 self._visualize_batch(
                                     images,
                                     preds,
@@ -848,9 +858,9 @@ class MedicalSegmenter(nn.Module):
         All other trainable params are treated as decoder.
         """
         # Choose patterns
-        if self.encoder_type == "swin_unetr":
+        if self.base_model == "swin_unetr":
             backbone_patterns = ("encoder.swinViT.",)
-        elif self.encoder_type == "clipseg":
+        elif self.base_model == "clipseg":
             backbone_patterns = ("encoder.clipseg.clip_model.",)
         else:
             backbone_patterns = ()
@@ -941,7 +951,7 @@ class MedicalSegmenter(nn.Module):
             labels = labels.to(device, non_blocking=True)
 
             # Ensure labels are in correct format [B, 1, D, H, W]
-            if self.encoder_type == "swin_unetr" and labels.dim() == 4:  # [B, D, H, W]
+            if self.base_model == "swin_unetr" and labels.dim() == 4:  # [B, D, H, W]
                 labels = labels.unsqueeze(1)
 
             # Apply dataset-specific label decoding if available
@@ -1411,6 +1421,15 @@ class MedicalSegmenter(nn.Module):
                     )
                     if visualize and viz_images is not None:
                         try:
+                            print("[DEBUG] Generating final visualization...")
+                            print("viz_images shape:", viz_images.shape)
+                            if len(viz_images.shape) == 4:
+                                # 3D batch: visualize middle slice
+                                mid_idx = viz_images.shape[2] // 2
+                                viz_images = viz_images[:, :, mid_idx, :, :]
+                                viz_preds = viz_preds[:, :, mid_idx, :, :]
+                                viz_labels = viz_labels[:, :, mid_idx, :, :]
+                            print("viz_images shape after slicing:", viz_images.shape)
                             self._visualize_batch(
                                 viz_images,
                                 viz_preds,

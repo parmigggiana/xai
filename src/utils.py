@@ -12,6 +12,8 @@ import psutil
 import torch
 import torch.nn
 
+from typing import Callable, Optional
+
 
 def assign_learning_rate(param_group, new_lr):
     param_group["lr"] = new_lr
@@ -101,6 +103,246 @@ class LabelSmoothing(torch.nn.Module):
 
 
 ######### Added #########
+
+
+# Normalization stats (mean, std) per dataset/domain.
+# Used by the legacy array/tensor-based preprocessing pipeline.
+NORM_STATS = {
+    ("MMWHS", "MR"): (186.5875, 258.5917),
+    ("MMWHS", "CT"): (-745.0086, 1042.7251),
+    ("CHAOS", "MR"): (90.8292, 168.8922),
+    ("CHAOS", "CT"): (-478.1732, 476.7163),
+}
+
+
+def get_decode_func(dataset_name: str, domain: str):
+    """Return a label decoding function for the given dataset/domain.
+
+    The returned function maps raw label intensities to class indices.
+    """
+
+    from src.datasets.mmwhs import mmwhs_labels
+
+    dataset_name_u = dataset_name.upper()
+    domain_u = domain.upper()
+
+    if dataset_name_u == "CHAOS":
+        if domain_u in ("MR", "MRI"):
+
+            def decode(labels):
+                return labels // 63
+
+            return decode
+
+        if domain_u == "CT":
+
+            def decode(labels):
+                return torch.where(labels > 0, 1.0, 0.0)
+
+            return decode
+
+    if dataset_name_u == "MMWHS":
+
+        def decode(labels):
+            decoded_labels = torch.zeros_like(labels, dtype=torch.float32)
+            for i, label_val in enumerate(mmwhs_labels.keys()):
+                decoded_labels[labels == label_val] = i
+            return decoded_labels
+
+        return decode
+
+    def decode(labels):
+        return labels
+
+    return decode
+
+
+def _wrap_transforms_for_memory_tracking(
+    transforms_list: list,
+    *,
+    track_memory: bool,
+    debug: bool,
+    memory_trace: bool,
+    memory_snapshot_fn: Optional[Callable[[str], None]],
+):
+    if not track_memory:
+        return transforms_list
+
+    class MemoryTrackingTransform:
+        def __init__(self, transform, name: str):
+            self.transform = transform
+            self.name = name
+
+        def __call__(self, data):
+            if memory_trace and memory_snapshot_fn is not None:
+                memory_snapshot_fn(f"Before {self.name}")
+            result = self.transform(data)
+            if debug and hasattr(result, "shape"):
+                print(f"Shape After: {result.shape}, dtype: {result.dtype}")
+            return result
+
+    return [MemoryTrackingTransform(t, t.__class__.__name__) for t in transforms_list]
+
+
+def _build_image_transforms(
+    *,
+    transforms_module,
+    use_3d: bool,
+    spatial_size: int,
+    mean: Optional[float],
+    std: Optional[float],
+    is_training: bool,
+):
+    T = transforms_module
+
+    if use_3d:
+        image_transforms = [
+            T.EnsureChannelFirst(channel_dim="no_channel"),
+            T.Orientation(axcodes="RAS"),
+        ]
+    else:
+        image_transforms = [
+            T.Lambda(lambda x: x.squeeze(-1)),
+            T.EnsureChannelFirst(channel_dim="no_channel"),
+        ]
+
+    image_transforms.append(
+        T.Resize(
+            spatial_size=spatial_size,
+            size_mode="longest",
+            mode="area",
+            anti_aliasing=True,
+        )
+    )
+
+    if use_3d:
+        image_transforms.append(
+            T.SpatialPad(spatial_size=(-1, -1, spatial_size // 2), mode="constant")
+        )
+
+    image_transforms.extend([T.ToTensor(), T.EnsureType(dtype=torch.float32)])
+
+    if mean is not None and std is not None:
+        image_transforms.append(
+            T.NormalizeIntensity(
+                subtrahend=float(mean),
+                divisor=float(std),
+                channel_wise=False,
+            )
+        )
+
+    if is_training:
+        image_transforms.extend(
+            [
+                T.RandGaussianNoise(prob=0.15, std=0.05),
+                T.RandAdjustContrast(prob=0.15, gamma=(0.95, 1.05)),
+            ]
+        )
+
+    if not use_3d:
+        image_transforms.append(T.RepeatChannel(repeats=3))
+
+    return image_transforms
+
+
+def _build_seg_transforms(
+    *,
+    transforms_module,
+    use_3d: bool,
+    spatial_size: int,
+    decode_func,
+):
+    T = transforms_module
+
+    if not use_3d:
+        seg_transforms = [
+            T.Lambda(lambda x: x.squeeze(-1)),
+            T.EnsureChannelFirst(channel_dim="no_channel"),
+        ]
+    else:
+        seg_transforms = [
+            T.EnsureChannelFirst(channel_dim="no_channel"),
+            T.Orientation(axcodes="RAS"),
+        ]
+
+    seg_transforms.extend(
+        [
+            T.ToTensor(),
+            T.EnsureType(dtype=torch.long),
+            T.Lambda(lambda x: decode_func(x)),
+            T.Resize(spatial_size=spatial_size, size_mode="longest", mode="nearest"),
+        ]
+    )
+
+    if use_3d:
+        seg_transforms.append(
+            T.SpatialPad(
+                spatial_size=(-1, -1, spatial_size // 2),
+                mode="constant",
+                constant_values=0,
+            )
+        )
+
+    return seg_transforms
+
+
+def get_preprocessing(
+    dataset_name: str,
+    domain: str,
+    *,
+    is_training: bool = True,
+    track_memory: bool = False,
+    use_3d: bool = True,
+    spatial_size: int = 128,
+    norm_stats: Optional[dict] = None,
+    debug: bool = False,
+    memory_trace: bool = False,
+    memory_snapshot_fn: Optional[Callable[[str], None]] = None,
+):
+    """Build MONAI transforms for images and segmentation masks.
+
+    This mirrors the legacy preprocessing used in the scripts (non-dict pipeline).
+    """
+
+    from monai import transforms
+
+    decode_func = get_decode_func(dataset_name, domain)
+    stats = norm_stats if norm_stats is not None else NORM_STATS
+    mean_std = stats.get((dataset_name, domain))
+    mean, std = mean_std if mean_std is not None else (None, None)
+
+    image_transforms = _build_image_transforms(
+        transforms_module=transforms,
+        use_3d=use_3d,
+        spatial_size=spatial_size,
+        mean=mean,
+        std=std,
+        is_training=is_training,
+    )
+    image_transforms = _wrap_transforms_for_memory_tracking(
+        image_transforms,
+        track_memory=track_memory,
+        debug=debug,
+        memory_trace=memory_trace,
+        memory_snapshot_fn=memory_snapshot_fn,
+    )
+    image_transform = transforms.Compose(image_transforms)
+
+    seg_transforms = _build_seg_transforms(
+        transforms_module=transforms,
+        use_3d=use_3d,
+        spatial_size=spatial_size,
+        decode_func=decode_func,
+    )
+    seg_transforms = _wrap_transforms_for_memory_tracking(
+        seg_transforms,
+        track_memory=track_memory,
+        debug=debug,
+        memory_trace=memory_trace,
+        memory_snapshot_fn=memory_snapshot_fn,
+    )
+    seg_transform = transforms.Compose(seg_transforms)
+    return image_transform, seg_transform
 
 
 def download_and_extract_dataset(dataset: str, base_path: str = "data/"):

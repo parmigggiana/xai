@@ -189,7 +189,7 @@ def build_model_variant(label: str, dataset: BaseDataset, encoder_type: str):
     if not ckpt.exists():
         raise FileNotFoundError(f"Missing checkpoint for {label}: {ckpt}")
 
-    model = dataset.get_model(encoder_type=encoder_type)
+    model = dataset.get_model(base_model=encoder_type)
 
     # Load encoder-only checkpoints saved in notebook (torch.save(model.encoder, ...))
     # We'll attach it back to the current model.
@@ -468,7 +468,7 @@ def run(args: argparse.Namespace):
                 if base_ckpt.exists():
                     try:
                         enc_mod = comp_ds.apply_to(base_ckpt, scaling_coef=ALPHA_TV)
-                        model = ds.get_model(encoder_type=encoder_type).to(device)
+                        model = ds.get_model(base_model=encoder_type).to(device)
                         model.encoder = enc_mod
                         model.eval()
                         model.freeze()
@@ -486,7 +486,7 @@ def run(args: argparse.Namespace):
                 if base_ckpt.exists():
                     try:
                         enc_mod = comp_dom.apply_to(base_ckpt, scaling_coef=ALPHA_TV)
-                        model = ds.get_model(encoder_type=encoder_type).to(device)
+                        model = ds.get_model(base_model=encoder_type).to(device)
                         model.encoder = enc_mod
                         model.eval()
                         model.freeze()

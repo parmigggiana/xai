@@ -29,14 +29,14 @@
               ipywidgets
 
               tqdm
-              # numpy
+              numpy
               # matplotlib
 
               # scikit-learn
               pandas
               seaborn
 
-              python-fontconfig
+              # python-fontconfig
 
               # pytorch
               # monai
