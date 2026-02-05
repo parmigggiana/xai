@@ -51,6 +51,7 @@ class MedicalSegmenter(nn.Module):
                 drop_rate=0.0,
                 attn_drop_rate=0.0,
                 dropout_path_rate=0.0,
+                use_checkpoint=True,
             )
             if pretrained:
                 self._load_swinvit_weights()
@@ -386,6 +387,9 @@ class MedicalSegmenter(nn.Module):
         try:
             if device.type == "cuda":
                 torch.backends.cudnn.benchmark = True
+                # Reset per-training-run OOM fallback state.
+                # If we hit an OOM with benchmark=True, we'll disable it once and retry that batch.
+                self._cudnn_benchmark_disabled_due_to_oom = False
         except Exception:
             pass
 
@@ -747,7 +751,7 @@ class MedicalSegmenter(nn.Module):
                 print(f"Epoch {epoch+1} - Val Loss: {epoch_val_loss:.4f}")
 
                 # Save best and early stopping based on validation loss only
-                improved = epoch_val_loss < best_val_loss - 1e-6
+                improved = epoch_val_loss < best_val_loss - 1e-4
                 if improved:
                     if save_best:
                         best_model_state = {
@@ -935,178 +939,123 @@ class MedicalSegmenter(nn.Module):
     ):
         """Process a single training batch with error handling."""
 
-        try:
+        # Retry once: if we OOM with cudnn.benchmark=True, disable it and try again.
+        # This targets "large CuDNN workspace" OOMs that can happen on some GPUs (e.g., Kaggle T4).
+        if not hasattr(self, "_cudnn_benchmark_disabled_due_to_oom"):
+            self._cudnn_benchmark_disabled_due_to_oom = False
 
-            optimizer.zero_grad(set_to_none=True)
+        for attempt in range(2):
+            images = None
+            labels = None
+            try:
+                optimizer.zero_grad(set_to_none=True)
 
-            images, labels = self._unpack_batch(batch)
-            if images is None or labels is None:
-                raise RuntimeError("Batch does not contain 'image' and 'label'.")
-            # Convert MetaTensor -> Tensor to avoid meta tracking issues in forward
-            if hasattr(images, "as_tensor"):
-                images = images.as_tensor()
-            if hasattr(labels, "as_tensor"):
-                labels = labels.as_tensor()
-            images = images.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
+                images, labels = self._unpack_batch(batch)
+                if images is None or labels is None:
+                    raise RuntimeError("Batch does not contain 'image' and 'label'.")
+                # Convert MetaTensor -> Tensor to avoid meta tracking issues in forward
+                if hasattr(images, "as_tensor"):
+                    images = images.as_tensor()
+                if hasattr(labels, "as_tensor"):
+                    labels = labels.as_tensor()
+                images = images.to(device, non_blocking=True)
+                labels = labels.to(device, non_blocking=True)
 
-            # Ensure labels are in correct format [B, 1, D, H, W]
-            if self.base_model == "swin_unetr" and labels.dim() == 4:  # [B, D, H, W]
-                labels = labels.unsqueeze(1)
+                # Ensure labels are in correct format [B, 1, D, H, W]
+                if (
+                    self.base_model == "swin_unetr" and labels.dim() == 4
+                ):  # [B, D, H, W]
+                    labels = labels.unsqueeze(1)
 
-            # Apply dataset-specific label decoding if available
-            # NOTE: dataset.decode commented out elsewhere; keep as-is
-
-            # Forward pass with AMP (if enabled)
-            if device.type == "cuda":
-                amp_dtype = getattr(self, "_amp_dtype", torch.float16)
-                with torch.amp.autocast("cuda", dtype=amp_dtype):
+                # Forward pass with AMP (if enabled)
+                if device.type == "cuda":
+                    amp_dtype = getattr(self, "_amp_dtype", torch.float16)
+                    with torch.amp.autocast("cuda", dtype=amp_dtype):
+                        outputs = self.forward(images)
+                        loss = loss_function(outputs, labels)
+                else:
                     outputs = self.forward(images)
                     loss = loss_function(outputs, labels)
-            else:
-                outputs = self.forward(images)
-                loss = loss_function(outputs, labels)
 
-            # Debug ogni 20 batch
-            # if batch_idx % 20 == 0:
-            #     print(
-            #         "labels dtype/min/max:",
-            #         labels.dtype,
-            #         labels.min().item(),
-            #         labels.max().item(),
-            #     )
-            #     uniq = np.unique(labels.detach().cpu().numpy())
-            #     print(f"[DEBUG] Batch {batch_idx} - Loss: {loss.item():.6f}")
-            #     print(f"[DEBUG] Unique labels: {uniq}")
-            #     print(
-            #         f"[DEBUG] Outputs -> mean: {outputs.mean().item():.6f}, std: {outputs.std().item():.6f}"
-            #     )
-            #     print("Unique labels in batch:", torch.unique(labels))
-            #     # Convert to class indices for compact debug (choose argmax for multi-class)
-            #     try:
-            #         preds_idx = torch.argmax(outputs, dim=1, keepdim=False)
-            #         print(
-            #             "Unique prediction classes in batch:", torch.unique(preds_idx)
-            #         )
-            #     except Exception:
-            #         # Fallback: show summary stats if argmax not applicable
-            #         print("Unique predictions (summary):", torch.unique(outputs))
+                # Backward/step
+                if (
+                    device.type == "cuda"
+                    and getattr(self, "_amp_dtype", None) == torch.float16
+                    and scaler is not None
+                ):
+                    scaler.scale(loss).backward()
+                    try:
+                        scaler.unscale_(optimizer)
+                    except Exception:
+                        pass
+                    if max_grad_norm and max_grad_norm > 0:
+                        try:
+                            torch.nn.utils.clip_grad_norm_(
+                                self.parameters(), max_grad_norm
+                            )
+                        except Exception:
+                            pass
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    if max_grad_norm and max_grad_norm > 0:
+                        try:
+                            torch.nn.utils.clip_grad_norm_(
+                                self.parameters(), max_grad_norm
+                            )
+                        except Exception:
+                            pass
+                    optimizer.step()
 
-            # Backward/step: use GradScaler only for FP16; BF16/FP32 use standard path
-            if (
-                device.type == "cuda"
-                and getattr(self, "_amp_dtype", None) == torch.float16
-                and scaler is not None
-            ):
-                scaler.scale(loss).backward()
-                # Unscale before optional gradient clipping
+                # Debug info
+                if compute_debug:
+                    dbg = {}
+                else:
+                    dbg = None
+
                 try:
-                    scaler.unscale_(optimizer)
+                    del images, labels
                 except Exception:
                     pass
-                if max_grad_norm and max_grad_norm > 0:
+                return outputs, loss.item(), True, dbg
+
+            except torch.cuda.OutOfMemoryError:
+                # First OOM: disable cudnn benchmark and retry once
+                if (
+                    device.type == "cuda"
+                    and attempt == 0
+                    and not self._cudnn_benchmark_disabled_due_to_oom
+                ):
+                    print(
+                        f"❌ OOM at batch {batch_idx} (attempt {attempt+1}/2). "
+                        f"Disabling torch.backends.cudnn.benchmark and retrying batch once..."
+                    )
                     try:
-                        torch.nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
+                        torch.backends.cudnn.benchmark = False
                     except Exception:
                         pass
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                if max_grad_norm and max_grad_norm > 0:
+                    self._cudnn_benchmark_disabled_due_to_oom = True
+
+                    # Best-effort cleanup before retry
                     try:
-                        torch.nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
+                        optimizer.zero_grad(set_to_none=True)
                     except Exception:
                         pass
-                optimizer.step()
+                    try:
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            torch.cuda.synchronize()
+                    except Exception:
+                        pass
 
-            # Prepare debug info only when requested to minimize overhead
-            if compute_debug:
-                total_norm = None
-                try:
-                    total_norm = 0.0
-                    param_count = 0
-                    for p in self.parameters():
-                        if p.grad is not None:
-                            param_norm = p.grad.data.norm(2)
-                            total_norm += param_norm.item() ** 2
-                            param_count += 1
-                    if param_count > 0:
-                        total_norm = total_norm ** (1.0 / 2)
-                except Exception:
-                    total_norm = None
+                    continue  # retry same batch
 
-                try:
-                    uniq_labels = [
-                        int(x)
-                        for x in np.unique(labels.detach().cpu().numpy()).tolist()
-                    ]
-                except Exception:
-                    uniq_labels = []
-
-                # Per-step gradient sums for a few representative layers
-                layer_grad_sums = None
-
-                # Summary counts: trainable vs. with gradients this step
-                grad_counts = None
-                try:
-                    trainable_cnt = 0
-                    grad_present_cnt = 0
-                    for p in self.parameters():
-                        if p.requires_grad:
-                            trainable_cnt += 1
-                            if p.grad is not None:
-                                grad_present_cnt += 1
-                    grad_counts = {
-                        "trainable": trainable_cnt,
-                        "with_grad": grad_present_cnt,
-                    }
-                except Exception:
-                    grad_counts = None
-
-                # Optimizer coverage check on the first debug batch
-                opt_cov = None
-                try:
-                    if batch_idx == 0:
-                        opt_ids = {
-                            id(p)
-                            for g in optimizer.param_groups
-                            for p in g.get("params", [])
-                        }
-                        req_ids = {id(p) for p in self.parameters() if p.requires_grad}
-                        missing = len(req_ids - opt_ids)
-                        extra = len(opt_ids - req_ids)
-                        opt_cov = {
-                            "trainable_not_in_opt": missing,
-                            "opt_not_trainable": extra,
-                        }
-                except Exception:
-                    opt_cov = None
-
-                dbg = {
-                    "batch_idx": batch_idx,
-                    "grad_norm": float(total_norm) if total_norm is not None else None,
-                    "unique_labels": uniq_labels,
-                    "layer_grad_sums": layer_grad_sums,
-                    "grad_counts": grad_counts,
-                    "optimizer_coverage": opt_cov,
-                }
-            else:
-                dbg = None
-
-            # Clean up intermediate tensors
-            del images, labels
-
-            return outputs, loss.item(), True, dbg
-        except torch.cuda.OutOfMemoryError:
-            print(f"❌ OOM at batch {batch_idx}, clearing cache and continuing...")
-            # CUDA cache calls commented out per request to remove CUDA optimizations
-            # if torch.cuda.is_available():
-            #     torch.cuda.empty_cache()
-            return None, 0.0, False, None
-        # except Exception as e:
-        #     print(f"⚠️ Error at batch {batch_idx}: {e}")
-        #     return None, 0.0, False, None
+                # Second OOM (or already disabled): give up on this batch
+                print(
+                    f"❌ OOM at batch {batch_idx} (attempt {attempt+1}/2), skipping batch."
+                )
+                return None, 0.0, False, None
 
     def load_task_vector(self, task_vector, scaling_coef: float = 1.0):
         """Apply a task vector to the current encoder with a scaling coefficient.
